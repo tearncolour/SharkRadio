@@ -1,0 +1,172 @@
+# RoboMaster 2026 Radar SDR Client Implementation Plan
+
+## Background
+
+根据 RoboMaster 2026 机甲大师超级对抗赛比赛规则手册，雷达系统需要解析电磁波信号以获取对方队伍信息。本项目将创建一个完整的软件无线电客户端来实现这一功能。
+
+### 电磁波参数规格
+
+| 波源 | 中心频点 (MHz) | 带宽 (MHz) | 功率 (dBm) | 波特率 (MBaud) |
+|------|----------------|------------|------------|----------------|
+| 红方广播源 | 433.2 | 0.54 | -60 | 0.25 |
+| 红方一级干扰源 | 432.2 | 1.04 | -10 | 0.5 |
+| 红方二级干扰源 | 432.6 | 0.61 | 10 | 0.285 |
+| 红方三级干扰源 | 433.2 | 0.44 | -10 | 0.2 |
+| 蓝方广播源 | 433.92 | 0.54 | -60 | 0.25 |
+| 蓝方一级干扰源 | 434.92 | 1.04 | -10 | 0.5 |
+| 蓝方二级干扰源 | 434.52 | 0.61 | 10 | 0.285 |
+| 蓝方三级干扰源 | 433.92 | 0.44 | -10 | 0.2 |
+
+### 调制方式
+- **4-RRC-FSK**: 在 4GFSK 基础上将高斯滤波器替换为 RRC 滤波器
+- **FSK 映射**: 00→-3, 01→-1, 10→1, 11→3
+- **RRC 参数**: Interpolation:8, Gain:8, SampleRate:2M, SymbolRate:250k, Alpha:0.25
+
+---
+
+## Proposed Changes
+
+### Backend (Python + GNU Radio + ADI PLUTO SDR)
+
+#### [NEW] [backend/](file:///home/shark/桌面/SharkRadio/backend/)
+
+Python 后端目录结构:
+
+```
+backend/
+├── requirements.txt          # Python 依赖
+├── main.py                   # 主入口，WebSocket 服务器
+├── sdr/
+│   ├── __init__.py
+│   ├── pluto_driver.py       # ADI PLUTO SDR 驱动封装
+│   ├── demodulator.py        # 4-RRC-FSK 解调器
+│   └── signal_processor.py   # 信号处理流程
+├── protocol/
+│   ├── __init__.py
+│   └── packet_parser.py      # 数据包解析器
+└── api/
+    ├── __init__.py
+    └── websocket_handler.py  # WebSocket API 处理
+```
+
+**核心模块功能：**
+
+1. **pluto_driver.py** - ADI PLUTO SDR 控制
+   - 使用 PyADI-IIO 库连接 PLUTO
+   - 配置采样率 2MHz，中心频率 433MHz
+   - 实时 IQ 数据采集
+
+2. **demodulator.py** - 4-RRC-FSK 解调
+   - GNU Radio 流图实现
+   - RRC 滤波器 (Alpha=0.25, Interpolation=8)
+   - 4FSK 符号解映射
+
+3. **signal_processor.py** - 信号处理
+   - FFT 频谱分析
+   - 干扰源检测与滤除
+   - 广播信号提取
+
+---
+
+### Frontend (Vue3 + TypeScript + Ant Design)
+
+#### [NEW] [frontend/](file:///home/shark/桌面/SharkRadio/frontend/)
+
+Vue3 前端目录结构:
+
+```
+frontend/
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+├── index.html
+├── src/
+│   ├── main.ts
+│   ├── App.vue
+│   ├── styles/
+│   │   └── global.css         # 全局样式，深色主题
+│   ├── components/
+│   │   ├── SDRStatus.vue      # SDR 连接状态面板
+│   │   ├── SpectrumView.vue   # 频谱图显示
+│   │   ├── WaterfallView.vue  # 瀑布图显示
+│   │   ├── DecodedData.vue    # 解码数据展示
+│   │   └── RadarProgress.vue  # 雷达标记进度
+│   ├── composables/
+│   │   └── useWebSocket.ts    # WebSocket 连接管理
+│   ├── stores/
+│   │   └── sdrStore.ts        # Pinia 状态管理
+│   └── types/
+│       └── index.ts           # TypeScript 类型定义
+```
+
+**UI 设计特点：**
+- 深色科技风格主题
+- 实时频谱/瀑布图可视化
+- 红/蓝方信号状态指示
+- 雷达标记进度仪表盘
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph Hardware
+        SDR[ADI PLUTO SDR]
+    end
+    
+    subgraph Backend["Backend (Python)"]
+        Driver[PLUTO Driver<br/>PyADI-IIO]
+        Demod[4-RRC-FSK<br/>Demodulator]
+        Proc[Signal<br/>Processor]
+        WS[WebSocket<br/>Server]
+        
+        SDR --> Driver
+        Driver --> Demod
+        Demod --> Proc
+        Proc --> WS
+    end
+    
+    subgraph Frontend["Frontend (Vue3)"]
+        UI[Dashboard UI]
+        Spectrum[Spectrum View]
+        Waterfall[Waterfall]
+        Data[Decoded Data]
+        
+        WS --> UI
+        UI --> Spectrum
+        UI --> Waterfall
+        UI --> Data
+    end
+```
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> 1. **硬件确认**: 请确认您拥有 ADI PLUTO SDR 设备，并已安装相关驱动
+> 2. **GNU Radio 版本**: 建议使用 GNU Radio 3.10+，是否已安装？
+> 3. **Python 环境**: 建议使用 Python 3.10+，是否需要创建虚拟环境？
+
+> [!WARNING]
+> 此项目涉及无线电信号接收，请确保在合法频段和场景下使用（如 RoboMaster 比赛场地）。
+
+---
+
+## Verification Plan
+
+### Automated Tests
+```bash
+# 后端单元测试
+cd backend && python -m pytest tests/
+
+# 前端构建检查
+cd frontend && npm run build
+```
+
+### Manual Verification
+1. 连接 PLUTO SDR 并验证 IQ 数据采集
+2. 使用信号发生器测试解调功能
+3. 验证 WebSocket 实时数据流
+4. 检查前端 UI 响应性和数据显示

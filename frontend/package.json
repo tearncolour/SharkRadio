@@ -1,0 +1,49 @@
+{
+  "name": "shark-radio-client",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"vite\" \"npm run electron:compile -- --watch\" \"wait-on tcp:5173 dist-electron/main.cjs && cross-env NODE_ENV=development electron .\"",
+    "electron:compile": "tsc -p electron/tsconfig.json",
+    "electron:build": "npm run build && npm run electron:compile && electron-builder"
+  },
+  "dependencies": {
+    "@ant-design/icons-vue": "^7.0.0",
+    "ant-design-vue": "^4.1.0",
+    "echarts": "^5.5.0",
+    "pinia": "^2.1.0",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "vue-tsc": "^1.8.0",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.sharkradio.client",
+    "productName": "SharkRadio",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  }
+}
