@@ -9,6 +9,8 @@ export interface SDRStatus {
   centerFreq: number;
   sampleRate: number;
   gain: number;
+  overflow?: boolean;
+  underflow?: boolean;
 }
 
 export interface RadarTarget {

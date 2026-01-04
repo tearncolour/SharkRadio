@@ -4,9 +4,10 @@ SDR 设备管理器
 """
 
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 import iio
+import numpy as np
 
 from .pluto_driver import PlutoDriver, PlutoConfig
 
@@ -18,6 +19,7 @@ class SDRDeviceInfo:
     name: str  # 设备名称
     uri: str  # 连接 URI
     serial: str = ""  # 序列号
+    mac: str = ""     # MAC地址
     product: str = ""  # 产品名称
     is_available: bool = True  # 是否可用
 
@@ -29,6 +31,7 @@ class SDRInstance:
     driver: PlutoDriver
     mode: str = "rx"  # rx, tx, txrx
     is_active: bool = False
+    is_streaming: bool = False
 
 
 class SDRManager:
@@ -46,6 +49,27 @@ class SDRManager:
         self._active_device_id: Optional[str] = None
         self._lock = threading.Lock()
     
+    def _get_mac_from_arp(self, ip_addr: str) -> str:
+        """从 ARP 表获取 MAC 地址"""
+        try:
+            # 如果是 hostname，尝试解析
+            if any(c.isalpha() for c in ip_addr):
+                import socket
+                try:
+                    ip_addr = socket.gethostbyname(ip_addr)
+                except:
+                    pass
+            
+            with open('/proc/net/arp', 'r') as f:
+                lines = f.readlines()[1:] # Skip header
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[0] == ip_addr:
+                        return parts[3]
+        except Exception:
+            pass
+        return ""
+
     def scan_devices(self) -> List[SDRDeviceInfo]:
         """
         扫描所有可用的 IIO 设备
@@ -60,6 +84,11 @@ class SDRManager:
             ctx_info = iio.scan_contexts()
             
             for uri, description in ctx_info.items():
+                # 如果设备已连接及管理中，直接使用现有信息
+                if uri in self._devices:
+                    devices.append(self._devices[uri].device_info)
+                    continue
+
                 # 尝试获取更多设备信息
                 try:
                     ctx = iio.Context(uri)
@@ -72,15 +101,32 @@ class SDRManager:
                             break
                     
                     if is_pluto or 'pluto' in description.lower() or 'pluto' in uri.lower():
+                        # 尝试获取序列号
+                        serial = getattr(ctx, 'serial', '') or ''
+                        if not serial:
+                            serial = ctx.attrs.get('hw_serial', '')
+                        if not serial:
+                            serial = ctx.attrs.get('serial', '')
+                            
+                        # 尝试获取 MAC
+                        mac = ""
+                        if 'ip:' in uri:
+                            ip_part = uri.replace('ip:', '')
+                            mac = self._get_mac_from_arp(ip_part)
+
                         device_info = SDRDeviceInfo(
                             id=uri,
                             name=ctx.name or f"PLUTO SDR ({uri})",
                             uri=uri,
-                            serial=getattr(ctx, 'serial', '') or '',
+                            serial=serial,
+                            mac=mac,
                             product="ADI PLUTO SDR",
                             is_available=True
                         )
                         devices.append(device_info)
+                        
+                    # Explicit context cleanup
+                    del ctx
                         
                 except Exception as e:
                     print(f"无法连接设备 {uri}: {e}")
@@ -100,10 +146,19 @@ class SDRManager:
                 for uri in default_uris:
                     try:
                         ctx = iio.Context(uri)
+                        
+                        serial = getattr(ctx, 'serial', '') or ''
+                        if not serial:
+                            serial = ctx.attrs.get('hw_serial', '')
+                            
+                        mac = self._get_mac_from_arp(uri.replace('ip:', ''))
+                        
                         devices.append(SDRDeviceInfo(
                             id=uri,
                             name=f"PLUTO SDR ({uri})",
                             uri=uri,
+                            serial=serial,
+                            mac=mac,
                             product="ADI PLUTO SDR",
                             is_available=True
                         ))
@@ -159,6 +214,7 @@ class SDRManager:
                         id=device_id,
                         name=f"PLUTO SDR ({device_id})",
                         uri=device_id,
+                        mac=self._get_mac_from_arp(device_id.replace('ip:', '')) if 'ip:' in device_id else "",
                         product="ADI PLUTO SDR"
                     ),
                     driver=driver,
@@ -257,13 +313,14 @@ class SDRManager:
             
             return True
     
-    def start_tx_signal(self, device_id: str, signal_type: str) -> bool:
+    def start_tx_signal(self, device_id: str, signal_type: str, payload: Optional[str] = None) -> bool:
         """
         开始发射指定类型的信号
         
         Args:
             device_id: 设备 ID
             signal_type: 信号类型 (red_broadcast, blue_broadcast, jam_1, jam_2, jam_3)
+            payload: 信号载荷 (可选, ASCII 字符串或 Hex)
             
         Returns:
             是否成功启动
@@ -274,11 +331,28 @@ class SDRManager:
             
             # 这里简化实现：目前仅打印日志，实际需要生成对应波形并循环发送
             # 将来可以在这里启动一个后台线程持续发送 samples
-            print(f"Starting TX signal '{signal_type}' on device {device_id}")
+            print(f"Starting TX signal '{signal_type}' on device {device_id} (Payload: {payload})")
             
-            # TODO: 实现具体的波形生成器和发送循环
-            # samples = generate_signal(signal_type)
-            # self._devices[device_id].driver.transmit_samples(samples)
+            try:
+                from sdr.signal_generator import generate_signal, get_signal_params
+                
+                # 获取信号参数并调整发射频率
+                params = get_signal_params(signal_type)
+                target_freq = params.get('freq')
+                
+                if target_freq:
+                    driver = self._devices[device_id].driver
+                    if hasattr(driver, 'set_tx_frequency'):
+                        driver.set_tx_frequency(target_freq)
+                
+                samples = generate_signal(signal_type, payload, self._devices[device_id].driver.config.sample_rate)
+                
+                # 设置 cyclic buffer 以持续发送
+                self._devices[device_id].driver.transmit_samples(samples)
+                print(f"Transmitting {len(samples)} samples (Cyclic) at {target_freq/1e6:.2f} MHz")
+            except Exception as e:
+                print(f"Failed to start TX signal: {e}")
+                return False
             
             return True
 
@@ -288,7 +362,70 @@ class SDRManager:
             if device_id not in self._devices:
                 return False
             print(f"Stopping TX signal on device {device_id}")
+            
+            try:
+                self._devices[device_id].driver.stop_transmission()
+            except:
+                pass
+                
             return True
+
+    def start_streaming(self, device_id: str, callback: Callable[[np.ndarray], None]) -> bool:
+        """
+        启动指定设备的数据流
+        
+        Args:
+            device_id: 设备 ID
+            callback: 数据处理回调函数
+            
+        Returns:
+            是否成功
+        """
+        with self._lock:
+            instance = self._devices.get(device_id)
+            if not instance:
+                return False
+            
+            if instance.is_streaming:
+                return True
+                
+            try:
+                if hasattr(instance.driver, 'start_streaming'):
+                    instance.driver.start_streaming(callback)
+                    instance.is_streaming = True
+                    return True
+            except Exception as e:
+                print(f"启动流失败: {e}")
+                return False
+        return False
+
+    def stop_streaming(self, device_id: str) -> bool:
+        """
+        停止指定设备的数据流
+        
+        Args:
+            device_id: 设备 ID
+            
+        Returns:
+            是否成功
+        """
+        with self._lock:
+            instance = self._devices.get(device_id)
+            if not instance:
+                return False
+            
+            if not instance.is_streaming:
+                return True
+                
+            try:
+                if hasattr(instance.driver, 'stop_streaming'):
+                    instance.driver.stop_streaming()
+                    instance.is_streaming = False
+                    return True
+            except Exception as e:
+                print(f"停止流失败: {e}")
+                return False
+        return False
 
     def disconnect_all(self):
         """断开所有设备"""

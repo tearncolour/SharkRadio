@@ -1,27 +1,40 @@
 :root {
-  --bg-color: #0a0a0c;
-  --panel-bg: rgba(22, 22, 26, 0.8);
-  --glass-bg: rgba(255, 255, 255, 0.05);
-  --text-color: #f0f0f2;
-  --text-secondary: #a0a0a5;
-  --primary-color: #00e5ff;
-  --primary-glow: rgba(0, 229, 255, 0.3);
-  --accent-color: #7d5fff;
-  --success-color: #00ff88;
-  --warning-color: #ffe066;
-  --error-color: #ff4d4f;
-  --border-radius: 12px;
+  /* Premium Dark Theme Palette */
+  --bg-color: #0b0c0e;           /* Deep dark background */
+  --panel-bg: rgba(20, 21, 25, 0.7); /* Translucent panel */
+  --glass-bg: rgba(255, 255, 255, 0.03);
+  
+  /* Text Colors */
+  --text-main: #e0e6ed;          /* High readability white-blue-ish */
+  --text-secondary: #94a3b8;     /* Standard subsidiary text */
+  --text-dim: #64748b;           /* Disabled or very subtle text */
+  
+  /* Brand Colors */
+  --primary-color: #00f2ff;      /* Cyan - Radar core */
+  --primary-glow: rgba(0, 242, 255, 0.25);
+  --accent-color: #6366f1;       /* Indigo - Secondary actions */
+  
+  /* Status Colors */
+  --success-color: #10b981;      /* Emerald */
+  --warning-color: #f59e0b;      /* Amber */
+  --error-color: #ef4444;        /* Red */
+  
+  /* Geometry */
+  --border-radius: 8px;          /* Slightly tighter for technical look */
+  --border-color: rgba(255, 255, 255, 0.08);
 }
 
 body {
   margin: 0;
   padding: 0;
   background-color: var(--bg-color);
+  /* Subtle grid or gradient background */
   background-image: 
-    radial-gradient(circle at 50% 0%, rgba(0, 229, 255, 0.05) 0%, transparent 50%),
-    radial-gradient(circle at 100% 100%, rgba(125, 95, 255, 0.05) 0%, transparent 50%);
-  color: var(--text-color);
-  font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+  color: var(--text-main);
+  font-family: 'Inter', 'JetBrains Mono', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   height: 100vh;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -29,46 +42,109 @@ body {
 
 #app {
   height: 100vh;
+  background: radial-gradient(circle at 50% 0%, rgba(0, 242, 255, 0.08) 0%, transparent 60%);
 }
 
 .ant-layout {
   background: transparent !important;
 }
 
+/* Glassmorphism Cards */
 .ant-card {
   background: var(--panel-bg) !important;
-  backdrop-filter: blur(12px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  backdrop-filter: blur(16px) !important;
+  border: 1px solid var(--border-color) !important;
   border-radius: var(--border-radius) !important;
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
-  color: var(--text-color) !important;
+  /* box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.2) !important; */
+  color: var(--text-main) !important;
 }
 
 .ant-card-head {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-bottom: 1px solid var(--border-color) !important;
   color: var(--primary-color) !important;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px !important;
   font-weight: 600 !important;
-  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
-.ant-descriptions-item-label {
-  color: var(--text-secondary) !important;
+.ant-card-head-title {
+    padding: 12px 0 !important;
 }
 
-.ant-descriptions-item-content {
-  color: var(--text-color) !important;
+.ant-card-body {
+    padding: 16px !important;
 }
 
-/* Animations */
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 var(--primary-glow); }
-  70% { box-shadow: 0 0 0 10px rgba(0, 229, 255, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(0, 229, 255, 0); }
+/* Alert Overrides */
+.ant-alert {
+  background-color: rgba(0, 242, 255, 0.1) !important;
+  border: 1px solid rgba(0, 242, 255, 0.2) !important;
+}
+.ant-alert-message {
+  color: var(--primary-color) !important;
+}
+.ant-alert-description {
+  color: var(--text-main) !important;
+}
+.ant-alert-info .ant-alert-icon {
+  color: var(--primary-color) !important;
 }
 
-.streaming-active {
-  animation: pulse 2s infinite;
+/* Form & Input overrides for Dark Mode */
+.ant-form-item-label > label {
+    color: var(--text-secondary) !important;
+    font-size: 12px;
 }
+
+.ant-input, .ant-input-number, .ant-select-selector {
+    background-color: rgba(0,0,0,0.3) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.ant-input:focus, .ant-input-number:focus, .ant-select-selector:focus {
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 2px rgba(0, 242, 255, 0.1) !important;
+}
+
+.ant-btn {
+    border-radius: 4px !important;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.ant-btn-primary {
+    background-color: var(--primary-color) !important;
+    border-color: var(--primary-color) !important;
+    color: #000 !important; /* High contrast text on Cyan */
+}
+.ant-btn-primary:hover {
+    background-color: #4dfaff !important;
+    border-color: #4dfaff !important;
+    box-shadow: 0 0 15px var(--primary-glow);
+}
+
+.ant-btn-primary.ant-btn-danger {
+    background-color: var(--error-color) !important;
+    border-color: var(--error-color) !important;
+    color: #fff !important;
+}
+
+/* Typography Utilities */
+.text-mono {
+    font-family: 'JetBrains Mono', monospace;
+}
+.text-xs { font-size: 10px; }
+.text-sm { font-size: 12px; }
+.text-base { font-size: 14px; }
+.text-lg { font-size: 16px; }
+
+.text-secondary { color: var(--text-secondary); }
+.text-dim { color: var(--text-dim); }
+.text-primary { color: var(--primary-color); }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
@@ -83,5 +159,5 @@ body {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--primary-color);
+  background: var(--text-secondary);
 }

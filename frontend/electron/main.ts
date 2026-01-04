@@ -17,7 +17,10 @@ const createWindow = () => {
     },
     // Dark theme frame
     backgroundColor: '#141414',
-    title: 'SharkRadio - RoboMaster Radar Client'
+    title: 'SharkRadio - RoboMaster Radar Client',
+    frame: false, // Remove native frame
+    titleBarStyle: 'hidden', // Required for some environments to respect frame: false completely
+    autoHideMenuBar: true, // Hide menu bar
   });
 
   const isDev = process.env.NODE_ENV === 'development';
@@ -41,6 +44,24 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+import { ipcMain } from 'electron';
+
+ipcMain.on('window-minimize', () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.on('window-maximize', () => {
+  if (mainWindow?.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow?.maximize();
+  }
+});
+
+ipcMain.on('window-close', () => {
+  mainWindow?.close();
 });
 
 app.on('window-all-closed', () => {

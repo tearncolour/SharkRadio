@@ -19,7 +19,10 @@ const createWindow = () => {
         },
         // Dark theme frame
         backgroundColor: '#141414',
-        title: 'SharkRadio - RoboMaster Radar Client'
+        title: 'SharkRadio - RoboMaster Radar Client',
+        frame: false, // Remove native frame
+        titleBarStyle: 'hidden', // Required for some environments to respect frame: false completely
+        autoHideMenuBar: true, // Hide menu bar
     });
     const isDev = process.env.NODE_ENV === 'development';
     if (isDev) {
@@ -41,6 +44,21 @@ electron_1.app.whenReady().then(() => {
         if (electron_1.BrowserWindow.getAllWindows().length === 0)
             createWindow();
     });
+});
+const electron_2 = require("electron");
+electron_2.ipcMain.on('window-minimize', () => {
+    mainWindow?.minimize();
+});
+electron_2.ipcMain.on('window-maximize', () => {
+    if (mainWindow?.isMaximized()) {
+        mainWindow.unmaximize();
+    }
+    else {
+        mainWindow?.maximize();
+    }
+});
+electron_2.ipcMain.on('window-close', () => {
+    mainWindow?.close();
 });
 electron_1.app.on('window-all-closed', () => {
     if (process.platform !== 'darwin')

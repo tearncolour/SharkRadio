@@ -13,7 +13,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from typing import List, Dict, Any
 
 from sdr.pluto_driver import PlutoDriver, PlutoConfig
-from sdr.demodulator import RRCFSKDemodulator
 from sdr.signal_processor import SignalProcessor
 from sdr.sdr_manager import get_sdr_manager
 
@@ -59,7 +58,6 @@ class SDRSystem:
             sample_rate=2_000_000
         )
         self.driver = PlutoDriver(self.config)
-        self.demod = RRCFSKDemodulator(sample_rate=self.config.sample_rate)
         self.processor = SignalProcessor(sample_rate=self.config.sample_rate)
         self.running = False
         self.loop_ref = None
@@ -93,10 +91,10 @@ class SDRSystem:
             return
             
         try:
+            # Spectrum
             spectrum = self.processor.compute_spectrum(samples)
             
             if manager.active_connections:
-                # spectrum.frequencies 和 power_db 已经是 list，无需再调用 tolist()
                 data = {
                     "type": "spectrum",
                     "frequencies": spectrum.frequencies[::10],
@@ -106,6 +104,7 @@ class SDRSystem:
                     manager.broadcast(json.dumps(data)), 
                     self.loop_ref
                 )
+                
         except Exception as e:
             print(f"Processing error: {e}")
 
@@ -113,7 +112,48 @@ class SDRSystem:
 sdr_system = SDRSystem()
 
 
+
 # ============ WebSocket 命令处理 ============
+MAIN_LOOP = None
+
+def create_stream_callback(device_id: str):
+    """创建特定设备的数据流回调"""
+    processor = SignalProcessor(sample_rate=2000000) # 默认 2M，理想情况应从配置获取
+    
+    def callback(samples: np.ndarray):
+        if not MAIN_LOOP:
+            return
+            
+        try:
+            # 获取当前中心频率
+            sdr_mgr = get_sdr_manager()
+            driver = sdr_mgr.get_device(device_id)
+            center_freq = 0.0
+            
+            if driver:
+                # 优先使用配置中的中心频率
+                center_freq = driver.config.center_freq
+            
+            spectrum = processor.compute_spectrum(samples, center_freq=center_freq)
+            
+            if manager.active_connections:
+                data = {
+                    "type": "spectrum",
+                    "device_id": device_id,
+                    "frequencies": spectrum.frequencies[::10],
+                    "power": spectrum.power_db[::10],
+                    "overflow": getattr(driver, '_rx_overflow', False) if driver else False,
+                    "underflow": getattr(driver, '_tx_underflow', False) if driver else False
+                }
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(json.dumps(data)), 
+                    MAIN_LOOP
+                )
+        except Exception as e:
+            print(f"Processing error for {device_id}: {e}")
+            
+    return callback
+
 async def handle_command(command: dict) -> dict:
     cmd = command.get("cmd", "")
     params = command.get("params", {})
@@ -125,6 +165,7 @@ async def handle_command(command: dict) -> dict:
         if cmd == "scan_devices":
             devices = sdr_manager.scan_devices()
             response["data"] = [{"id": d.id, "name": d.name, "uri": d.uri, 
+                                 "serial": d.serial, "mac": d.mac,
                                  "is_available": d.is_available} for d in devices]
             response["success"] = True
             
@@ -183,8 +224,9 @@ async def handle_command(command: dict) -> dict:
         elif cmd == "start_tx_signal":
             device_id = params.get("device_id")
             signal_type = params.get("signal_type")
+            payload = params.get("payload")
             if device_id and signal_type:
-                response["success"] = sdr_manager.start_tx_signal(device_id, signal_type)
+                response["success"] = sdr_manager.start_tx_signal(device_id, signal_type, payload)
             else:
                 response["error"] = "缺少参数"
                 
@@ -192,6 +234,21 @@ async def handle_command(command: dict) -> dict:
             device_id = params.get("device_id")
             if device_id:
                 response["success"] = sdr_manager.stop_tx_signal(device_id)
+            else:
+                response["error"] = "缺少 device_id"
+
+        elif cmd == "start_streaming":
+            device_id = params.get("device_id")
+            if device_id:
+                callback = create_stream_callback(device_id)
+                response["success"] = sdr_manager.start_streaming(device_id, callback)
+            else:
+                response["error"] = "缺少 device_id"
+
+        elif cmd == "stop_streaming":
+            device_id = params.get("device_id")
+            if device_id:
+                response["success"] = sdr_manager.stop_streaming(device_id)
             else:
                 response["error"] = "缺少 device_id"
 
@@ -207,10 +264,11 @@ async def handle_command(command: dict) -> dict:
 # ============ FastAPI 应用 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_running_loop()
-    sdr_system.start(loop)
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
+    # sdr_system.start(loop) # 暂时禁用旧的自动启动，转为手动控制
     yield
-    sdr_system.stop()
+    # sdr_system.stop()
 
 
 app = FastAPI(lifespan=lifespan)

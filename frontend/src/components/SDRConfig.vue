@@ -5,8 +5,32 @@
         <span class="device-name">{{ config.name || currentDevice?.name || 'Unknown Device' }}</span>
         <a-tag v-if="isConnected" color="success">已连接</a-tag>
         <a-tag v-else color="error">未连接</a-tag>
+        <a-tag :color="store.status.streaming ? 'processing' : 'default'" class="status-tag">
+          {{ store.status.streaming ? '串流中' : '待机' }}
+        </a-tag>
       </div>
-      <a-button type="link" size="small" @click="renameDevice">重命名</a-button>
+      <div class="header-actions">
+        <a-button type="link" size="small" @click="renameDevice">重命名</a-button>
+        <a-button type="primary" size="small" :danger="store.status.streaming" @click="toggleStream">
+           {{ store.status.streaming ? '停止' : '启动' }}
+        </a-button>
+      </div>
+    </div>
+    
+    <!-- 实时状态信息 -->
+    <div class="status-grid" v-if="isConnected">
+       <div class="status-item">
+         <span class="label">采样率</span>
+         <span class="value">{{ (store.status.sampleRate / 1e6).toFixed(1) }} M</span>
+       </div>
+       <div class="status-item">
+         <span class="label">实际频率</span>
+         <span class="value">{{ (store.status.centerFreq / 1e6).toFixed(3) }} MHz</span>
+       </div>
+       <div class="status-item">
+         <span class="label">RSSI</span>
+         <span class="value">-</span>
+       </div>
     </div>
 
     <!-- 工作模式选择 -->
@@ -81,12 +105,40 @@
         <a-form-item label="信号类型">
           <a-select v-model:value="config.txSignalType" @change="onTxSignalTypeChange">
             <a-select-option value="custom">自定义</a-select-option>
-            <a-select-option value="red_broadcast">红方标记广播</a-select-option>
-            <a-select-option value="blue_broadcast">蓝方标记广播</a-select-option>
-            <a-select-option value="jam_1">一类干扰波</a-select-option>
-            <a-select-option value="jam_2">二类干扰波</a-select-option>
-            <a-select-option value="jam_3">三类干扰波</a-select-option>
+            <a-select-option value="red_broadcast">红方广播源</a-select-option>
+            <a-select-option value="red_jam_1">红方一级干扰源</a-select-option>
+            <a-select-option value="red_jam_2">红方二级干扰源</a-select-option>
+            <a-select-option value="red_jam_3">红方三级干扰源</a-select-option>
+            <a-select-option value="blue_broadcast">蓝方广播源</a-select-option>
+            <a-select-option value="blue_jam_1">蓝方一级干扰源</a-select-option>
+            <a-select-option value="blue_jam_2">蓝方二级干扰源</a-select-option>
+            <a-select-option value="blue_jam_3">蓝方三级干扰源</a-select-option>
           </a-select>
+        </a-form-item>
+
+        <!-- 干扰源配置 -->
+        <a-form-item label="干扰字符 (6位 ASCII)" v-if="isJamming">
+           <a-input 
+             v-model:value="config.jammingPayload" 
+             :maxlength="6"
+             placeholder="例如: ABCDEF"
+             @change="updateConfig"
+           >
+             <template #suffix>
+               <span style="font-size: 10px; color: #666">{{ (config.jammingPayload || '').length }}/6</span>
+             </template>
+           </a-input>
+        </a-form-item>
+
+        <!-- 广播源配置 -->
+        <a-form-item label="广播数据配置" v-if="isBroadcast">
+            <a-button size="small" block @click="openBroadcastConfig" style="margin-bottom: 8px">
+                设置 Payload ({{ (config.broadcastPayload || '').length / 2 }} 字节)
+            </a-button>
+            <div v-if="config.broadcastPayload" class="payload-display">
+                <div class="label">当前 Payload (Hex):</div>
+                <div class="value">{{ config.broadcastPayload }}</div>
+            </div>
         </a-form-item>
 
         <a-row :gutter="8">
@@ -108,10 +160,21 @@
                 :min="-89" :max="0"
                 style="width: 100%"
                 @change="updateConfig"
+                :disabled="config.txSignalType !== 'custom'"
               />
             </a-form-item>
           </a-col>
         </a-row>
+
+        <a-form-item label="发射带宽 (MHz)">
+          <a-input-number 
+            v-model:value="txBwDisplay" 
+            :min="0.2" :max="6.0" :step="0.01"
+            style="width: 100%"
+            :disabled="config.txSignalType !== 'custom'"
+            @change="onBwChange"
+          />
+        </a-form-item>
         
         <a-space style="width: 100%">
           <a-button 
@@ -130,11 +193,25 @@
             @click="disableTx" 
             :disabled="!txEnabled"
           >
-            停止
+            停止 TX
           </a-button>
         </a-space>
       </a-form>
     </div>
+    <a-modal
+      v-model:open="renameModalVisible"
+      title="重命名设备"
+      @ok="handleRename"
+    >
+      <a-input v-model:value="newDeviceName" placeholder="请输入新的设备名称" @pressEnter="handleRename" />
+    </a-modal>
+
+    <BroadcastConfigModal 
+      v-model:visible="broadcastModalVisible"
+      v-model:modelValue="config.broadcastPayload"
+      :signalType="config.signalType"
+      @confirm="updateConfig"
+    />
   </div>
 </template>
 
@@ -143,6 +220,7 @@ import { ref, computed, watch, onMounted } from 'vue';
 import { useSDRStore } from '@/stores/sdrStore';
 import { message } from 'ant-design-vue';
 import type { SDRTab, TxSignalType, RxSignalType } from '@/types/sdrTypes';
+import BroadcastConfigModal from './BroadcastConfigModal.vue';
 
 const props = defineProps<{
   tabId: string;
@@ -151,14 +229,28 @@ const props = defineProps<{
 const store = useSDRStore();
 const txEnabled = ref(false);
 
+const renameModalVisible = ref(false);
+const broadcastModalVisible = ref(false);
+const newDeviceName = ref('');
+
 // 直接从 store 获取 tab 数据引用
 const config = computed(() => store.tabs.find(t => t.id === props.tabId)!);
 const currentDevice = computed(() => store.devices.find(d => d.id === config.value?.deviceId));
 const isConnected = computed(() => store.connectedDeviceIds.includes(config.value?.deviceId || ''));
+const isStreaming = computed(() => store.status.streaming); // 暂用全局状态，后续应改为 tab 独立状态
+
+const isJamming = computed(() => config.value?.txSignalType?.includes('jam'));
+const isBroadcast = computed(() => config.value?.txSignalType?.includes('broadcast'));
+
+const openBroadcastConfig = () => {
+    broadcastModalVisible.value = true;
+};
 
 // 显示用的频率变量 (MHz)
+// ... existing refs
 const rxFreqDisplay = ref(433.5);
 const txFreqDisplay = ref(433.5);
+const txBwDisplay = ref(2.0);
 
 // 监听 config 变化更新显示频率
 watch(() => config.value?.rxConfig.centerFreq, (val) => {
@@ -168,6 +260,26 @@ watch(() => config.value?.rxConfig.centerFreq, (val) => {
 watch(() => config.value?.txConfig.centerFreq, (val) => {
   if (val) txFreqDisplay.value = val / 1e6;
 }, { immediate: true });
+
+watch(() => config.value?.txConfig.bandwidth, (val) => {
+  if (val) txBwDisplay.value = val / 1e6;
+}, { immediate: true });
+
+const renameDevice = () => {
+  if (config.value) {
+    newDeviceName.value = config.value.name;
+    renameModalVisible.value = true;
+  }
+};
+
+const handleRename = () => {
+  if (newDeviceName.value && config.value) {
+    config.value.name = newDeviceName.value;
+    updateConfig();
+    renameModalVisible.value = false;
+    message.success('重命名成功');
+  }
+};
 
 const onFreqChange = (type: 'rx' | 'tx') => {
   if (!config.value) return;
@@ -179,16 +291,14 @@ const onFreqChange = (type: 'rx' | 'tx') => {
   updateConfig();
 };
 
-const updateConfig = () => {
-  store.updateTabConfig(props.tabId, { ...config.value });
+const onBwChange = () => {
+    if (!config.value) return;
+    config.value.txConfig.bandwidth = txBwDisplay.value * 1e6;
+    updateConfig();
 };
 
-const renameDevice = () => {
-  const newName = prompt('输入新名称', config.value.name);
-  if (newName) {
-    config.value.name = newName;
-    updateConfig();
-  }
+const updateConfig = () => {
+  store.updateTabConfig(props.tabId, { ...config.value });
 };
 
 const onRxSignalTypeChange = (val: RxSignalType) => {
@@ -206,19 +316,31 @@ const onRxSignalTypeChange = (val: RxSignalType) => {
 
 const onTxSignalTypeChange = (val: TxSignalType) => {
   if (!config.value) return;
-  
-  if (val === 'red_broadcast') {
-    config.value.txConfig.centerFreq = 433.2e6;
-  } else if (val === 'blue_broadcast') {
-    config.value.txConfig.centerFreq = 433.92e6;
+  // ... parameters logic ... 
+  const setParams = (freq: number, bw: number, gain: number) => {
+      config.value.txConfig.centerFreq = freq * 1e6;
+      config.value.txConfig.bandwidth = bw * 1e6;
+      let finalGain = gain;
+      if (finalGain > 0) finalGain = 0;
+      if (finalGain < -89) finalGain = -89;
+      config.value.txConfig.gain = finalGain;
+  };
+
+  switch (val) {
+      case 'red_broadcast': setParams(433.2, 0.54, -60); break;
+      case 'red_jam_1': setParams(432.2, 1.04, -10); break;
+      case 'red_jam_2': setParams(432.6, 0.61, 0); break;
+      case 'red_jam_3': setParams(433.2, 0.44, -10); break;
+      case 'blue_broadcast': setParams(433.92, 0.54, -60); break;
+      case 'blue_jam_1': setParams(434.92, 1.04, -10); break;
+      case 'blue_jam_2': setParams(434.52, 0.61, 0); break;
+      case 'blue_jam_3': setParams(433.92, 0.44, -10); break;
   }
-  // 干扰波频率根据规则设定，暂时设为默认
   updateConfig();
 };
 
 const applyRxConfig = async () => {
   if (!config.value) return;
-  
   const result = await store.sendCommand('configure_device', {
     device_id: config.value.deviceId,
     rx_config: {
@@ -238,8 +360,6 @@ const applyRxConfig = async () => {
 
 const enableTx = async () => {
   if (!config.value) return;
-  
-  // 先应用 TX 配置
   await store.sendCommand('configure_device', {
     device_id: config.value.deviceId,
     tx_config: {
@@ -248,15 +368,12 @@ const enableTx = async () => {
       bandwidth: config.value.txConfig.bandwidth
     }
   });
-  
   const result = await store.sendCommand('enable_tx', {
     device_id: config.value.deviceId
   });
-  
   if (result.success) {
     txEnabled.value = true;
     message.success('TX 已启用');
-    // 如果是广播模式，可以在这里给后端发指令开始发送特定序列
     if (config.value.txSignalType !== 'custom') {
         store.sendCommand('start_tx_signal', {
             device_id: config.value.deviceId,
@@ -270,17 +387,32 @@ const enableTx = async () => {
 
 const disableTx = async () => {
   if (!config.value) return;
-  
   const result = await store.sendCommand('disable_tx', {
     device_id: config.value.deviceId
   });
-  
   if (result.success) {
     txEnabled.value = false;
     message.success('TX 已禁用');
   } else {
     message.error(result.error || '禁用 TX 失败');
   }
+};
+
+const toggleStream = async () => {
+    if (!config.value) return;
+    const currentState = config.value.isStreaming;
+    const cmd = currentState ? 'stop_streaming' : 'start_streaming';
+    
+    const result = await store.sendCommand(cmd, {
+        device_id: config.value.deviceId
+    });
+    
+    if (result.success) {
+        store.updateTabConfig(props.tabId, { isStreaming: !currentState });
+        message.success(currentState ? '已停止串流' : '开始串流');
+    } else {
+        message.error(result.error || '操作失败');
+    }
 };
 </script>
 
@@ -289,30 +421,114 @@ const disableTx = async () => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  padding: 4px;
 }
 .device-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+.device-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 .device-name {
-  font-weight: bold;
+  font-weight: 700;
   font-size: 14px;
-  margin-right: 8px;
+  color: var(--text-main);
+}
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 16px;
+    background: rgba(0,0,0,0.2);
+    padding: 12px;
+    border-radius: var(--border-radius);
+    border: 1px solid var(--border-color);
+}
+.status-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+.status-item .label {
+    font-size: 10px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+.status-item .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--primary-color);
+    font-weight: 600;
+}
+.section {
+    animation: fadeIn 0.3s ease-out;
 }
 .section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 12px;
   text-transform: uppercase;
+  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+}
+.section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border-color);
+    margin-left: 8px;
 }
 .mode-selector {
   display: flex;
   justify-content: center;
+  margin-bottom: 16px;
+}
+:deep(.ant-radio-button-wrapper) {
+    background: transparent;
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+}
+:deep(.ant-radio-button-wrapper-checked) {
+    background: rgba(0, 242, 255, 0.1) !important;
+    border-color: var(--primary-color) !important;
+    color: var(--primary-color) !important;
+    box-shadow: none !important;
 }
 :deep(.ant-form-item) {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.payload-display {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 8px;
+    border-radius: var(--border-radius);
+    border: 1px dashed var(--border-color);
+}
+.payload-display .label {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+.payload-display .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--primary-color);
+    word-break: break-all;
+    line-height: 1.4;
 }
 </style>

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, shallowRef } from 'vue';
 import type { SDRStatus, SpectrumData, RadarTarget } from '@/types';
 import type { SDRTab, SDRConfig, TxSignalType, RxSignalType } from '@/types/sdrTypes';
 
@@ -34,11 +34,20 @@ export const useSDRStore = defineStore('sdr', () => {
   const tabs = ref<SDRTab[]>([]);
   const activeTabId = ref<string | null>(null);
 
-  // 频谱数据
-  const spectrum = ref<SpectrumData>({
-    frequencies: [],
-    power: []
+  // 频谱数据 (使用 shallowRef 提升性能，避免大数组深度响应式)
+  // Map: deviceId -> SpectrumData
+  const spectrums = shallowRef<Record<string, SpectrumData>>({});
+  // Compatibility computed for single-device views (returns data for active tab)
+  const spectrum = computed(() => {
+    if (activeTab.value && spectrums.value[activeTab.value.deviceId]) {
+      return spectrums.value[activeTab.value.deviceId];
+    }
+    return { frequencies: [], power: [] };
   });
+
+  // 运行时状态 (OVR/UND)
+  // Map: deviceId -> Status
+  const runtimeStatus = ref<Record<string, { overflow: boolean, underflow: boolean }>>({});
   
   // 雷达目标
   const targets = ref<RadarTarget[]>([]);
@@ -63,12 +72,17 @@ export const useSDRStore = defineStore('sdr', () => {
     if (activeTab.value) {
       const mode = activeTab.value.mode;
       const config = mode === 'tx' ? activeTab.value.txConfig : activeTab.value.rxConfig;
+      const devId = activeTab.value.deviceId;
+      const rtStatus = runtimeStatus.value[devId] || { overflow: false, underflow: false };
+      
       return {
         connected: true, // 如果有 tab 说明已连接
-        streaming: false, // 临时，需要 tab 内状态
+        streaming: activeTab.value.isStreaming, 
         centerFreq: config.centerFreq,
         sampleRate: config.sampleRate,
-        gain: config.gain
+        gain: config.gain,
+        overflow: rtStatus.overflow,
+        underflow: rtStatus.underflow
       };
     }
     return {
@@ -91,8 +105,29 @@ export const useSDRStore = defineStore('sdr', () => {
     }
   }
   
-  function updateSpectrum(data: SpectrumData) {
-    spectrum.value = data;
+  function updateSpectrum(data: any) {
+    // data should contain device_id
+    const deviceId = data.device_id;
+    if (!deviceId) return; // Ignore updates without device ID to prevent mixup
+    
+    // Update Spectrum
+    if (data.frequencies && data.power) {
+       // Create a copy or update reactive object
+       const newSpectrums = { ...spectrums.value };
+       newSpectrums[deviceId] = {
+        frequencies: data.frequencies,
+        power: data.power
+       };
+       spectrums.value = newSpectrums;
+    }
+    
+    // Update Runtime Status
+    if (typeof data.overflow === 'boolean' || typeof data.underflow === 'boolean') {
+        const current = runtimeStatus.value[deviceId] || { overflow: false, underflow: false };
+        if (typeof data.overflow === 'boolean') current.overflow = data.overflow;
+        if (typeof data.underflow === 'boolean') current.underflow = data.underflow;
+        runtimeStatus.value[deviceId] = current;
+    }
   }
   
   function updateTargets(newTargets: RadarTarget[]) {
@@ -111,7 +146,8 @@ export const useSDRStore = defineStore('sdr', () => {
       mode: 'rx',
       rxConfig: { ...DEFAULT_CONFIG },
       txConfig: { ...DEFAULT_CONFIG, gain: -10 },
-      isActive: true
+      isActive: true,
+      isStreaming: false
     };
     
     tabs.value.push(newTab);
@@ -160,21 +196,36 @@ export const useSDRStore = defineStore('sdr', () => {
     
     ws.onmessage = (event) => {
       try {
-        const response: CommandResponse = JSON.parse(event.data);
+        const msg = JSON.parse(event.data);
         
-        // 检查是否是对某个命令的响应
-        const cmdKey = response.cmd;
-        const resolver = pendingCommands.value.get(cmdKey);
-        if (resolver) {
-          resolver(response);
-          pendingCommands.value.delete(cmdKey);
+        // 1. 检查是否是对某个命令的响应 (has cmd field)
+        if (msg.cmd) {
+            const cmdKey = msg.cmd;
+            const resolver = pendingCommands.value.get(cmdKey);
+            if (resolver) {
+              resolver(msg as CommandResponse);
+              pendingCommands.value.delete(cmdKey);
+            }
         }
         
-        // 处理特殊消息类型
-        if (response.cmd === 'spectrum') {
-          updateSpectrum(response.data);
-        } else if (response.cmd === 'status') {
-          updateStatus(response.data);
+        // 2. 处理特殊消息类型 (broadcast messages)
+        // 后端直接发送 { type: 'spectrum', frequencies: [], power: [] }
+        if (msg.type === 'spectrum') {
+          // DEBUG LOG
+          // console.log('Store received spectrum:', msg.frequencies.length, 'points');
+          updateSpectrum({
+              frequencies: msg.frequencies, 
+              power: msg.power
+          });
+        } else if (msg.type === 'status') {
+          updateStatus(msg); // 假设 status 也是直接在 root
+        } 
+        
+        // 兼容旧逻辑: { cmd: 'spectrum', data: ... }
+        if (msg.cmd === 'spectrum' && msg.data) {
+          updateSpectrum(msg.data);
+        } else if (msg.cmd === 'status' && msg.data) {
+          updateStatus(msg.data);
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
@@ -217,6 +268,7 @@ export const useSDRStore = defineStore('sdr', () => {
     });
   }
 
+  return {
     // 状态
     tabs,
     activeTabId,

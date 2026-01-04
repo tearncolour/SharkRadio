@@ -1,4 +1,7 @@
-export type TxSignalType = 'red_broadcast' | 'blue_broadcast' | 'jam_1' | 'jam_2' | 'jam_3' | 'custom';
+export type TxSignalType = 
+  'red_broadcast' | 'red_jam_1' | 'red_jam_2' | 'red_jam_3' |
+  'blue_broadcast' | 'blue_jam_1' | 'blue_jam_2' | 'blue_jam_3' | 
+  'custom';
 export type RxSignalType = 'red_parse' | 'blue_parse' | 'custom';
 export type WorkMode = 'tx' | 'rx' | 'txrx';
 
@@ -20,4 +23,7 @@ export interface SDRTab {
   rxConfig: SDRConfig;
   txConfig: SDRConfig;
   isActive: boolean;
+  isStreaming: boolean;
+  jammingPayload?: string; // 6-char ASCII
+  broadcastPayload?: string; // Hex string for protocol 1.6
 }

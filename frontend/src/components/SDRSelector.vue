@@ -29,7 +29,8 @@
               </template>
               <template #description>
                 <span class="device-uri">{{ item.uri }}</span>
-                <span v-if="item.serial" class="device-serial"> | SN: {{ item.serial }}</span>
+                <span v-if="item.mac" class="device-mac"> | MAC: {{ item.mac }}</span>
+                <span v-if="item.serial" class="device-serial"> | ID: {{ item.serial }}</span>
               </template>
               <template #avatar>
                 <a-avatar :style="{ background: getDeviceColor(item) }">
@@ -85,6 +86,7 @@ interface SDRDevice {
   name: string;
   uri: string;
   serial: string;
+  mac: string;
   product: string;
   is_available: boolean;
 }
@@ -195,8 +197,16 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-secondary);
 }
-.device-serial {
+.device-mac {
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: #ffc107; /* Use a distinct color like Amber/Gold */
+  margin-left: 8px;
+}
+.device-serial {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #52c41a; /* Green for Serial/ID */
+  margin-left: 8px;
 }
 </style>

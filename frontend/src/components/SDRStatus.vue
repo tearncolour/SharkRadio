@@ -8,6 +8,9 @@
         <a-tag :color="store.status.streaming ? 'processing' : 'default'" :class="{ 'streaming-active': store.status.streaming }">
           {{ store.status.streaming ? '正在串流' : '待机中' }}
         </a-tag>
+        <!-- OVR/UND Indicators -->
+        <a-tag v-if="store.status.overflow" color="red">OVR</a-tag>
+        <a-tag v-if="store.status.underflow" color="orange">UND</a-tag>
       </div>
     </template>
     
