@@ -29,9 +29,17 @@ class SignalProcessor:
         else:
             samples = samples[-self.fft_size:]
             
+        # Normalize samples to [-1, 1] range (ADC is 12-bit, +/- 2048)
+        # This converts ADC counts to Volts/Float reference
+        samples_norm = samples / 2048.0
+        
         # 使用 numpy，等效于 GR 的 FFT 模块逻辑
-        windowed = samples * self.win
-        fft_result = np.fft.fft(windowed) / self.fft_size # Normalize
+        windowed = samples_norm * self.win
+        
+        # Normalize by Window Sum (Standard Amplitude/Power Normalization)
+        # 0 dBFS sine wave -> 0 dB Power
+        window_sum = np.sum(self.win)
+        fft_result = np.fft.fft(windowed) / window_sum
         fft_result = np.fft.fftshift(fft_result)
         
         power = np.abs(fft_result)**2

@@ -72,12 +72,27 @@ export function useWebSocket() {
           if (msg.type === 'pong' || msg.type === 'ping') {
             return;
           }
+
+          if (msg.type !== 'spectrum') {
+             console.log('[DEBUG Frontend] Received:', msg.type, msg);
+          }
           
           switch (msg.type) {
             case 'spectrum':
               store.updateSpectrum({
                 frequencies: msg.frequencies,
                 power: msg.power
+              });
+              break;
+            case 'packet':
+              // 处理解码的数据包
+              // console.log('DEBUG Packet:', msg);
+              store.addDecodedPacket({
+                timestamp: msg.timestamp,
+                hex: msg.hex,
+                packetType: msg.packet_type,
+                isValid: msg.is_valid,
+                deviceId: msg.device_id
               });
               break;
             case 'status':
@@ -90,7 +105,7 @@ export function useWebSocket() {
               // console.log('Unknown message type:', msg.type);
           }
         } catch (e) {
-          // console.error('Error parsing message:', e);
+          console.error('Error parsing message:', e, event.data);
         }
       };
       

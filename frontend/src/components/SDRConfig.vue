@@ -52,8 +52,18 @@
         <a-form-item label="信号类型">
           <a-select v-model:value="config.rxSignalType" @change="onRxSignalTypeChange">
             <a-select-option value="custom">自定义</a-select-option>
-            <a-select-option value="red_parse">红方广播解析 (433.2 MHz)</a-select-option>
-            <a-select-option value="blue_parse">蓝方广播解析 (433.92 MHz)</a-select-option>
+            <a-select-opt-group label="红方信号">
+              <a-select-option value="red_broadcast">红方广播 (433.20 MHz, 250k)</a-select-option>
+              <a-select-option value="red_jam_1">红方干扰1 (432.20 MHz, 500k)</a-select-option>
+              <a-select-option value="red_jam_2">红方干扰2 (432.60 MHz, 285k)</a-select-option>
+              <a-select-option value="red_jam_3">红方干扰3 (433.20 MHz, 200k)</a-select-option>
+            </a-select-opt-group>
+            <a-select-opt-group label="蓝方信号">
+              <a-select-option value="blue_broadcast">蓝方广播 (433.92 MHz, 250k)</a-select-option>
+              <a-select-option value="blue_jam_1">蓝方干扰1 (434.92 MHz, 500k)</a-select-option>
+              <a-select-option value="blue_jam_2">蓝方干扰2 (434.52 MHz, 285k)</a-select-option>
+              <a-select-option value="blue_jam_3">蓝方干扰3 (433.92 MHz, 200k)</a-select-option>
+            </a-select-opt-group>
           </a-select>
         </a-form-item>
 
@@ -304,12 +314,22 @@ const updateConfig = () => {
 const onRxSignalTypeChange = (val: RxSignalType) => {
   if (!config.value) return;
   
-  if (val === 'red_parse') {
-    config.value.rxConfig.centerFreq = 433.2e6;
-    config.value.rxConfig.bandwidth = 2e6;
-  } else if (val === 'blue_parse') {
-    config.value.rxConfig.centerFreq = 433.92e6;
-    config.value.rxConfig.bandwidth = 2e6;
+  // 信号参数: 频率 (MHz), 带宽 (MHz)
+  const signalParams: Record<string, { freq: number; bw: number }> = {
+    'red_broadcast':  { freq: 433.20, bw: 0.54 },
+    'red_jam_1':      { freq: 432.20, bw: 1.04 },
+    'red_jam_2':      { freq: 432.60, bw: 0.61 },
+    'red_jam_3':      { freq: 433.20, bw: 0.44 },
+    'blue_broadcast': { freq: 433.92, bw: 0.54 },
+    'blue_jam_1':     { freq: 434.92, bw: 1.04 },
+    'blue_jam_2':     { freq: 434.52, bw: 0.61 },
+    'blue_jam_3':     { freq: 433.92, bw: 0.44 },
+  };
+  
+  const params = signalParams[val];
+  if (params) {
+    config.value.rxConfig.centerFreq = params.freq * 1e6;
+    config.value.rxConfig.bandwidth = Math.max(params.bw * 1e6, 1e6); // 最小 1MHz 带宽确保信号可见
   }
   updateConfig();
 };
@@ -320,6 +340,7 @@ const onTxSignalTypeChange = (val: TxSignalType) => {
   const setParams = (freq: number, bw: number, gain: number) => {
       config.value.txConfig.centerFreq = freq * 1e6;
       config.value.txConfig.bandwidth = bw * 1e6;
+      
       let finalGain = gain;
       if (finalGain > 0) finalGain = 0;
       if (finalGain < -89) finalGain = -89;
@@ -375,10 +396,19 @@ const enableTx = async () => {
     txEnabled.value = true;
     message.success('TX 已启用');
     if (config.value.txSignalType !== 'custom') {
-        store.sendCommand('start_tx_signal', {
-            device_id: config.value.deviceId,
-            signal_type: config.value.txSignalType
-        });
+        // 根据信号类型选择正确的载荷
+        let payload: string | undefined;
+        if (config.value.txSignalType.includes('broadcast')) {
+            payload = config.value.broadcastPayload;
+        } else if (config.value.txSignalType.includes('jam')) {
+            payload = config.value.jammingPayload;
+        }
+            
+        store.startTxSignal(
+            config.value.deviceId, 
+            config.value.txSignalType,
+            payload
+        );
     }
   } else {
     message.error(result.error || '启用 TX 失败');
@@ -403,9 +433,17 @@ const toggleStream = async () => {
     const currentState = config.value.isStreaming;
     const cmd = currentState ? 'stop_streaming' : 'start_streaming';
     
-    const result = await store.sendCommand(cmd, {
+    // 构建命令参数
+    const params: Record<string, any> = {
         device_id: config.value.deviceId
-    });
+    };
+    
+    // 启动时传递信号类型
+    if (!currentState && config.value.rxSignalType && config.value.rxSignalType !== 'custom') {
+        params.signal_type = config.value.rxSignalType;
+    }
+    
+    const result = await store.sendCommand(cmd, params);
     
     if (result.success) {
         store.updateTabConfig(props.tabId, { isStreaming: !currentState });

@@ -46,15 +46,17 @@
             <!-- 原始数据包日志 (仅在非纯TX模式下显示，或者一直显示？用户可能想看接收包) -->
             <!-- 逻辑: TX模式通常不看接收包，但如果只想看TX数据监控，也可以。 -->
             <!-- 为了保持界面整洁，TX模式下如果有 TXDataView 占据全屏，可能不需要这个 log，除非有分屏 -->
-            <a-card v-if="viewMode !== 'tx'" title="收到的原始解码包 (Raw Packets)" class="panel-card" style="min-height: 250px">
+            <!-- 原始数据包日志 (始终显示，方便监控) -->
+            <a-card :title="`收到的原始解码包 (Raw Packets) [${store.decodedPackets.length}]`" class="panel-card" style="min-height: 250px">
               <template #extra>
-                <a-button type="link" size="small">清除日志</a-button>
+                <a-button type="link" size="small" @click="store.clearDecodedPackets()">清除日志</a-button>
               </template>
               <div class="packet-log">
-                <a-empty v-if="packets.length === 0" description="暂未接收到符合 4-RRC-FSK 协议的数据包" />
-                <div v-else v-for="(p, i) in packets" :key="i" class="packet-row">
-                  <span class="timestamp">[{{ p.time }}]</span>
-                  <span class="hex">{{ p.data }}</span>
+                <a-empty v-if="store.decodedPackets.length === 0" description="暂未接收到符合 4-RRC-FSK 协议的数据包" />
+                <div v-else v-for="(p, i) in store.decodedPackets" :key="i" class="packet-row">
+                  <span class="timestamp">[{{ p.timestamp }}]</span>
+                  <span class="hex">{{ p.hex }}</span>
+                  <span class="packet-type" v-if="p.packetType !== 'unknown'">({{ p.packetType }})</span>
                 </div>
               </div>
             </a-card>
@@ -210,6 +212,7 @@ onMounted(() => {
   gap: 16px;
   min-width: 350px;
   max-width: 450px;
+  overflow-y: auto;
 }
 
 .right-panel {
@@ -229,7 +232,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   backdrop-filter: blur(16px);
-  overflow: hidden;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 

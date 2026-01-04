@@ -323,7 +323,7 @@ class SDRManager:
             payload: 信号载荷 (可选, ASCII 字符串或 Hex)
             
         Returns:
-            是否成功启动
+            (是否成功启动, 预览频谱数据)
         """
         with self._lock:
             if device_id not in self._devices:
@@ -336,25 +336,102 @@ class SDRManager:
             try:
                 from sdr.signal_generator import generate_signal, get_signal_params
                 
-                # 获取信号参数并调整发射频率
+                # 获取信号参数
                 params = get_signal_params(signal_type)
                 target_freq = params.get('freq')
+                target_bandwidth = params.get('bandwidth', 540000)  # 默认 540kHz
+                target_power = params.get('power', -10)  # 默认 -10 dBm
                 
-                if target_freq:
-                    driver = self._devices[device_id].driver
-                    if hasattr(driver, 'set_tx_frequency'):
+                driver = self._devices[device_id].driver
+                
+                # 自动配置发射参数 (带详细错误处理)
+                try:
+                    if target_freq and hasattr(driver, 'set_tx_frequency'):
                         driver.set_tx_frequency(target_freq)
+                except Exception as e:
+                    print(f"Error setting TX frequency: {e}")
+                    raise
                 
-                samples = generate_signal(signal_type, payload, self._devices[device_id].driver.config.sample_rate)
+                try:
+                    if hasattr(driver, 'set_tx_gain'):
+                        driver.set_tx_gain(target_power)
+                except Exception as e:
+                    print(f"Error setting TX gain: {e}")
+                    raise
                 
-                # 设置 cyclic buffer 以持续发送
-                self._devices[device_id].driver.transmit_samples(samples)
-                print(f"Transmitting {len(samples)} samples (Cyclic) at {target_freq/1e6:.2f} MHz")
+                try:
+                    if hasattr(driver, 'set_tx_rf_bandwidth'):
+                        driver.set_tx_rf_bandwidth(target_bandwidth)
+                except Exception as e:
+                    print(f"Error setting TX bandwidth: {e}")
+                    raise
+                
+                try:
+                    samples = generate_signal(signal_type, payload, self._devices[device_id].driver.config.sample_rate)
+                except Exception as e:
+                    print(f"Error generating signal: {e}")
+                    raise
+                
+                try:
+                    # 设置 cyclic buffer 以持续发送
+                    self._devices[device_id].driver.transmit_samples(samples)
+                    print(f"Transmitting {len(samples)} samples (Cyclic) at {target_freq/1e6:.2f} MHz")
+                except Exception as e:
+                    print(f"Error transmitting samples: {e}")
+                    raise
+                
+                # Generate Packet Preview Spectrum
+                # Use FFT with windowing for consistent dBFS scaling with RX spectrum
+                
+                # Use a reasonable segment for FFT
+                fft_size = 2048
+                preview_len = min(len(samples), fft_size * 8)  # Average over 8 segments
+                preview_samples = samples[:preview_len]
+                
+                sample_rate = self._devices[device_id].driver.config.sample_rate
+                
+                # Average multiple FFTs for smoother spectrum
+                num_segments = preview_len // fft_size
+                if num_segments < 1:
+                    num_segments = 1
+                    fft_size = len(preview_samples)
+                
+                window = np.hamming(fft_size)
+                window_sum = np.sum(window)
+                
+                avg_power = np.zeros(fft_size)
+                for i in range(num_segments):
+                    segment = preview_samples[i*fft_size : (i+1)*fft_size]
+                    if len(segment) < fft_size:
+                        continue
+                    fft_vals = np.fft.fft(segment * window)
+                    # Amplitude normalization for dBFS
+                    magnitude = np.abs(fft_vals) / window_sum
+                    avg_power += magnitude ** 2
+                
+                avg_power /= num_segments
+                power_db = 10 * np.log10(avg_power + 1e-12)
+                
+                # Shift to center
+                freqs = np.fft.fftfreq(fft_size, 1/sample_rate)
+                freqs = np.fft.fftshift(freqs)
+                power_db = np.fft.fftshift(power_db)
+                
+                # Downsample for UI
+                step = max(1, len(freqs) // 256)
+                preview_data = {
+                    "frequencies": freqs[::step].tolist(), 
+                    "power": power_db[::step].tolist(),
+                    "center_freq": target_freq
+                }
+                
+                return True, preview_data
+                
             except Exception as e:
                 print(f"Failed to start TX signal: {e}")
-                return False
+                return False, None
             
-            return True
+            return True, None
 
     def stop_tx_signal(self, device_id: str) -> bool:
         """停止信号发射"""

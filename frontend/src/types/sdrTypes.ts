@@ -2,7 +2,13 @@ export type TxSignalType =
   'red_broadcast' | 'red_jam_1' | 'red_jam_2' | 'red_jam_3' |
   'blue_broadcast' | 'blue_jam_1' | 'blue_jam_2' | 'blue_jam_3' | 
   'custom';
-export type RxSignalType = 'red_parse' | 'blue_parse' | 'custom';
+
+// RX 解调信号类型
+export type RxSignalType = 
+  'red_broadcast' | 'red_jam_1' | 'red_jam_2' | 'red_jam_3' |
+  'blue_broadcast' | 'blue_jam_1' | 'blue_jam_2' | 'blue_jam_3' | 
+  'custom';
+
 export type WorkMode = 'tx' | 'rx' | 'txrx';
 
 export interface SDRConfig {

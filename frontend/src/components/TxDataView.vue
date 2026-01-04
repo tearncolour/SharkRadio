@@ -1,5 +1,11 @@
 <template>
   <a-card title="发射数据监控 (TX Monitor)" size="small" :bordered="false" class="tx-card">
+    <template #extra>
+      <div class="status-indicators">
+        <!-- TX 模式下不显示 RX 溢出，只显示 TX 欠载 -->
+        <a-tag :color="store.status.underflow ? '#faad14' : '#333'">UND</a-tag>
+      </div>
+    </template>
     <div class="tx-container">
       
       <!-- TX Status Header -->
@@ -40,14 +46,34 @@
              <div class="empty-text">暂无有效载荷配置</div>
         </div>
       </div>
+      <!-- TX Spectrum Preview -->
+      <div class="spectrum-preview-section" v-if="hasTxData">
+        <div class="section-label">发送信号预览 (TX Spectrum Expected):</div>
+        <div class="chart-container">
+           <v-chart class="chart" :option="chartOption" autoresize />
+        </div>
+      </div>
+      <div v-else class="spectrum-preview-section empty">
+         <div class="empty-text">等待发送... (启动 TX 后显示预览)</div>
+      </div>
 
     </div>
   </a-card>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watchEffect } from 'vue';
 import { useSDRStore } from '@/stores/sdrStore';
+
+// ECharts
+import VChart from 'vue-echarts';
+import { use } from 'echarts/core';
+import { CanvasRenderer } from 'echarts/renderers';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, TooltipComponent, TitleComponent, DataZoomComponent } from 'echarts/components';
+
+use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, TitleComponent, DataZoomComponent]);
+
 
 const store = useSDRStore();
 
@@ -96,6 +122,77 @@ const payloadAscii = computed(() => {
      return null;
 });
 
+// TX Spectrum Chart Logic
+const hasTxData = computed(() => {
+    return store.txSpectrum.frequencies && store.txSpectrum.frequencies.length > 0;
+});
+
+const chartOption = computed(() => {
+    const data = store.txSpectrum;
+    if (!data.frequencies || data.frequencies.length === 0) return {};
+    
+    // Convert to Absolute Frequency (MHz)
+    const centerFreqMHz = (config.value?.txConfig.centerFreq || 433.5e6) / 1e6;
+    
+    // X-Axis: Absolute Frequency
+    const xData = data.frequencies.map(f => ((f / 1e6) + centerFreqMHz).toFixed(3));
+    
+    // Y-Axis: Adaptive Scale
+    // Find peak power to set reasonable range
+    const maxPower = Math.max(...data.power);
+    const minPower = Math.max(maxPower - 80, -100); // Show dynamic range of 80dB or floor at -100
+
+    return {
+        animation: false,
+        grid: {
+            top: 30, right: 20, bottom: 25, left: 50,
+            containLabel: true
+        },
+        tooltip: { 
+            trigger: 'axis',
+            formatter: (params: any) => {
+                const pt = params[0];
+                return `${pt.name} MHz<br/>Power: ${pt.value.toFixed(1)} dB`;
+            }
+        },
+        xAxis: {
+            type: 'category', 
+            data: xData,
+            name: 'Freq (MHz)',
+            nameLocation: 'middle',
+            nameGap: 25,
+            axisLabel: { 
+                showMaxLabel: true,
+                interval: 'auto' 
+            },
+            axisTick: { alignWithLabel: true }
+        },
+        yAxis: {
+            type: 'value',
+            name: 'dB',
+            min: Math.floor(minPower / 10) * 10,
+            max: Math.ceil((maxPower + 5) / 10) * 10, // Add headroom
+            splitLine: { lineStyle: { color: '#333' } }
+        },
+        series: [{
+            type: 'line',
+            data: data.power,
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1, color: '#00ff00' },
+            areaStyle: { color: 'rgba(0, 255, 0, 0.1)' },
+            markLine: {
+                symbol: 'none',
+                label: { formatter: 'CF', position: 'end' },
+                lineStyle: { type: 'dashed', color: '#faad14' },
+                data: [
+                    { xAxis: xData.find(f => Math.abs(parseFloat(f) - centerFreqMHz) < 0.001) || '0' }
+                ]
+            }
+        }]
+    };
+});
+
 </script>
 
 <style scoped>
@@ -108,6 +205,8 @@ const payloadAscii = computed(() => {
   flex: 1;
   padding: 16px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .tx-container {
@@ -120,6 +219,7 @@ const payloadAscii = computed(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-shrink: 0;
 }
 
 .status-indicator {
@@ -154,11 +254,43 @@ const payloadAscii = computed(() => {
 }
 
 .payload-section {
+    margin-top: 12px;
+    flex-shrink: 0;
+    max-height: 40%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.spectrum-preview-section {
     flex: 1;
+    margin-top: 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     min-height: 0;
+    border-top: 1px dashed var(--border-color);
+    padding-top: 12px;
+}
+.spectrum-preview-section.empty {
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+.chart-container {
+    flex: 1;
+    min-height: 0;
+    background: #000;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+}
+
+.chart {
+    width: 100%;
+    height: 100%;
 }
 
 .section-label {
@@ -169,7 +301,6 @@ const payloadAscii = computed(() => {
 }
 
 .payload-box {
-    flex: 1;
     background: #000;
     border: 1px solid var(--border-color);
     border-radius: 4px;
@@ -185,6 +316,7 @@ const payloadAscii = computed(() => {
     color: var(--text-dim);
     font-size: 12px;
     font-style: italic;
+    padding: 24px;
 }
 
 .hex-grid {

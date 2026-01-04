@@ -1,5 +1,11 @@
 <template>
   <a-card title="实时频谱分析 (FFT) & 瀑布图" size="small" :bordered="false" class="spectrum-card">
+    <template #extra>
+      <div class="status-indicators">
+        <a-tag :color="store.status.overflow ? '#ff4d4f' : '#333'">OVR</a-tag>
+        <a-tag :color="store.status.underflow ? '#faad14' : '#333'">UND</a-tag>
+      </div>
+    </template>
     <div class="view-container">
       <div ref="chartRef" class="spectrum-chart"></div>
       <div class="waterfall-container">
@@ -292,6 +298,10 @@ onUnmounted(() => {
     border-radius: var(--border-radius);
     border: 1px solid var(--border-color);
     box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+    /* 与频谱图 grid 对齐: left: 50, right: 20 */
+    padding-left: 50px;
+    padding-right: 20px;
+    box-sizing: border-box;
 }
 .waterfall-canvas {
     width: 100%;

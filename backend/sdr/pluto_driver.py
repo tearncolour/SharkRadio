@@ -32,7 +32,7 @@ class PlutoConfig:
     # 发射参数
     tx_freq: float = 433.5e6  # 发射频率
     tx_gain: int = -10  # 发射增益 (dB, 负值衰减)
-    tx_rf_bandwidth: int = 4_000_000  # 发射 RF 带宽
+    tx_rf_bandwidth: int = 540_000  # 发射 RF 带宽 (匹配 GRC 设置)
     
     # 缓冲区
     buffer_size: int = 16384  # IQ 样本缓冲区大小
@@ -145,10 +145,42 @@ class PlutoDriver:
             print(f"TX frequency set to {freq/1e6:.3f} MHz")
 
     def set_tx_gain(self, gain: int):
-        self.config.tx_gain = gain
+        """设置 TX 增益 (dB)
+        
+        Pluto SDR TX 增益范围: -89.75 dB 到 0 dB (衰减模式)
+        正值会被约束到 0 dB
+        """
+        # Pluto SDR TX gain 范围约束
+        MIN_GAIN = -89
+        MAX_GAIN = 0
+        
+        constrained_gain = max(MIN_GAIN, min(MAX_GAIN, gain))
+        if constrained_gain != gain:
+            print(f"Warning: TX gain {gain} dB out of range [{MIN_GAIN}, {MAX_GAIN}], using {constrained_gain} dB")
+        
+        self.config.tx_gain = constrained_gain
         if self._sdr:
-            self._sdr.tx_hardwaregain_chan0 = int(gain)
-            print(f"TX gain set to {gain} dB")
+            self._sdr.tx_hardwaregain_chan0 = int(constrained_gain)
+            print(f"TX gain set to {constrained_gain} dB")
+
+    def set_tx_rf_bandwidth(self, bandwidth: int):
+        """设置 TX RF 带宽 (Hz)"""
+        # Pluto SDR 最小 RF 带宽约 200kHz，最大约 20MHz
+        MIN_BW = 200_000
+        MAX_BW = 20_000_000
+        
+        # 约束带宽在有效范围内
+        constrained_bw = max(MIN_BW, min(MAX_BW, bandwidth))
+        if constrained_bw != bandwidth:
+            print(f"Warning: TX RF bandwidth {bandwidth/1e6:.3f} MHz out of range, using {constrained_bw/1e6:.3f} MHz")
+        
+        self.config.tx_rf_bandwidth = constrained_bw
+        if self._sdr:
+            try:
+                self._sdr.tx_rf_bandwidth = int(constrained_bw)
+                print(f"TX RF bandwidth set to {constrained_bw/1e6:.3f} MHz")
+            except Exception as e:
+                print(f"Error setting TX RF bandwidth: {e}")
 
     def configure_tx(self):
         """配置发射参数 (Lazy init when needed)"""
@@ -162,16 +194,29 @@ class PlutoDriver:
         except Exception as e:
             print(f"Error configuring TX: {e}")
 
+    def enable_tx(self):
+        """Enable TX (configure if needed)"""
+        self.configure_tx()
+
+    def disable_tx(self):
+        """Disable TX"""
+        self.stop_transmission()
+
     def transmit_samples(self, samples: np.ndarray):
         if not self._sdr: return
         
         try:
+            # STOP previous TX first to allow reconfiguration/re-creation of buffer
+            self.stop_transmission()
+
             # Ensure TX is configured
             self.configure_tx()
             
-            # Scale if needed (managed by Signal Gen)
-            # Enable TX buffer
-            self._sdr.tx(samples)
+            # Scale samples for AD9361 DAC (expects values around 2^14 range, not 0-1)
+            # Signal Generator creates 0.9 max amplitude.
+            # We scale by 2**14 (16384) to drive DAC.
+            samples_scaled = samples * (2**14)
+            self._sdr.tx(samples_scaled)
             print("TX enabled")
         except Exception as e:
             print(f"Error during transmission: {e}")
@@ -194,7 +239,8 @@ class PlutoDriver:
             expected_duration = self.config.buffer_size / self.config.sample_rate
             
             # Basic Overflow Detection
-            if self._last_rx_time > 0 and (now - self._last_rx_time) > (expected_duration * 1.5):
+            # 使用较宽松的阈值，考虑解调处理时间
+            if self._last_rx_time > 0 and (now - self._last_rx_time) > (expected_duration * 3.0):
                 self._rx_overflow = True
             else:
                 self._rx_overflow = False

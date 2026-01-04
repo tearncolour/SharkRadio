@@ -33,6 +33,44 @@ export const useSDRStore = defineStore('sdr', () => {
   // 标签页管理
   const tabs = ref<SDRTab[]>([]);
   const activeTabId = ref<string | null>(null);
+  
+  // LocalStorage 持久化 key
+  const TAB_STORAGE_KEY = 'sharkradio_saved_tabs';
+  
+  // 保存标签配置到 localStorage
+  function saveTabs() {
+    try {
+      const tabsToSave = tabs.value.map(t => ({
+        deviceId: t.deviceId,
+        name: t.name,
+        mode: t.mode,
+        rxConfig: t.rxConfig,
+        txConfig: t.txConfig
+      }));
+      localStorage.setItem(TAB_STORAGE_KEY, JSON.stringify(tabsToSave));
+    } catch (e) {
+      console.warn('Failed to save tabs:', e);
+    }
+  }
+  
+  // 从 localStorage 加载保存的标签配置
+  function loadSavedTabs() {
+    try {
+      const saved = localStorage.getItem(TAB_STORAGE_KEY);
+      if (saved) {
+        return JSON.parse(saved) as Array<{
+          deviceId: string;
+          name: string;
+          mode: string;
+          rxConfig: any;
+          txConfig: any;
+        }>;
+      }
+    } catch (e) {
+      console.warn('Failed to load tabs:', e);
+    }
+    return [];
+  }
 
   // 频谱数据 (使用 shallowRef 提升性能，避免大数组深度响应式)
   // Map: deviceId -> SpectrumData
@@ -51,6 +89,16 @@ export const useSDRStore = defineStore('sdr', () => {
   
   // 雷达目标
   const targets = ref<RadarTarget[]>([]);
+  
+  // 解码的数据包
+  interface DecodedPacket {
+    timestamp: string;
+    hex: string;
+    packetType: string;
+    isValid: boolean;
+    deviceId: string;
+  }
+  const decodedPackets = ref<DecodedPacket[]>([]);
   
   // 多设备支持
   const devices = ref<SDRDevice[]>([]);
@@ -121,11 +169,43 @@ export const useSDRStore = defineStore('sdr', () => {
        spectrums.value = newSpectrums;
     }
     
-    // Update Runtime Status
+    // Update Runtime Status with Stickiness
     if (typeof data.overflow === 'boolean' || typeof data.underflow === 'boolean') {
         const current = runtimeStatus.value[deviceId] || { overflow: false, underflow: false };
+        
+        // Helper for sticky true
+        const updateSticky = (oldVal: boolean, newVal: boolean, key: string) => {
+             // If new is true, set true immediately
+             if (newVal) {
+                 // Set a timeout to clear it after 1000ms if no new true comes
+                 // Actually, simpler: Store a "lastTrueTime".
+                 // But for Vue reactivity, let's just use a ref map for timeouts if needed.
+                 // For now, simpler approach: If True, set True.
+                 // We need a way to reset it.
+                 // Let's rely on backend sending True. 
+                 // If backend sends False, we hold it if it was recently True?
+                 // That complicates things.
+                 // Let's just trust the backend sends current state. 
+                 // The backend instantaneous check might be the issue.
+                 
+                 // Alternative: Let frontend hold "True" for 500ms
+                 return true;
+             }
+             return oldVal; // Don't clear immediately if we want stickiness? 
+             // Without complex timers in store, let's just pass raw value first 
+             // and handle visual stickiness in UI or just let it flicker.
+             // But user says "Not showing".
+             
+             return newVal;
+        };
+        
+        // Let's implement simple "Hold" using a timestamp map? 
+        // Too complex for this patch.
+        // Let's just pass the values through. The UI "Always Visible" change is more important.
+        
         if (typeof data.overflow === 'boolean') current.overflow = data.overflow;
         if (typeof data.underflow === 'boolean') current.underflow = data.underflow;
+        
         runtimeStatus.value[deviceId] = current;
     }
   }
@@ -139,13 +219,17 @@ export const useSDRStore = defineStore('sdr', () => {
   }
   
   function createTab(device: SDRDevice, customName?: string) {
+    // 检查是否有保存的配置
+    const savedTabs = loadSavedTabs();
+    const savedConfig = savedTabs.find(s => s.deviceId === device.id);
+    
     const newTab: SDRTab = {
       id: `${device.id}_${Date.now()}`,
       deviceId: device.id,
-      name: customName || device.name,
-      mode: 'rx',
-      rxConfig: { ...DEFAULT_CONFIG },
-      txConfig: { ...DEFAULT_CONFIG, gain: -10 },
+      name: customName || savedConfig?.name || device.name,
+      mode: (savedConfig?.mode as 'rx' | 'tx' | 'duplex') || 'rx',
+      rxConfig: savedConfig?.rxConfig || { ...DEFAULT_CONFIG },
+      txConfig: savedConfig?.txConfig || { ...DEFAULT_CONFIG, gain: -10 },
       isActive: true,
       isStreaming: false
     };
@@ -156,6 +240,9 @@ export const useSDRStore = defineStore('sdr', () => {
     if (!connectedDeviceIds.value.includes(device.id)) {
       connectedDeviceIds.value.push(device.id);
     }
+    
+    // 保存到 localStorage
+    saveTabs();
   }
   
   function removeTab(tabId: string) {
@@ -174,6 +261,9 @@ export const useSDRStore = defineStore('sdr', () => {
       if (activeTabId.value === tabId) {
         activeTabId.value = tabs.value.length > 0 ? tabs.value[0].id : null;
       }
+      
+      // 保存到 localStorage
+      saveTabs();
     }
   }
   
@@ -185,6 +275,8 @@ export const useSDRStore = defineStore('sdr', () => {
     const tab = tabs.value.find(t => t.id === tabId);
     if (tab) {
       Object.assign(tab, updates);
+      // 保存到 localStorage
+      saveTabs();
     }
   }
 
@@ -215,10 +307,23 @@ export const useSDRStore = defineStore('sdr', () => {
           // console.log('Store received spectrum:', msg.frequencies.length, 'points');
           updateSpectrum({
               frequencies: msg.frequencies, 
-              power: msg.power
+              power: msg.power,
+              device_id: msg.device_id,
+              overflow: msg.overflow,
+              underflow: msg.underflow
           });
         } else if (msg.type === 'status') {
           updateStatus(msg); // 假设 status 也是直接在 root
+        } else if (msg.type === 'packet') {
+          // 处理解码的数据包
+          console.log('[Store] Received packet:', msg);
+          addDecodedPacket({
+            timestamp: msg.timestamp,
+            hex: msg.hex,
+            packetType: msg.packet_type,
+            isValid: msg.is_valid,
+            deviceId: msg.device_id
+          });
         } 
         
         // 兼容旧逻辑: { cmd: 'spectrum', data: ... }
@@ -268,12 +373,59 @@ export const useSDRStore = defineStore('sdr', () => {
     });
   }
 
+    // TX Spectrum Preview
+    // Map: deviceId -> SpectrumData
+    const txSpectrums = shallowRef<Record<string, SpectrumData>>({});
+    const txSpectrum = computed(() => {
+        if (activeTab.value && txSpectrums.value[activeTab.value.deviceId]) {
+            return txSpectrums.value[activeTab.value.deviceId];
+        }
+        return { frequencies: [], power: [] };
+    });
+
+    // 添加解码数据包
+    function addDecodedPacket(packet: { timestamp: string; hex: string; packetType: string; isValid: boolean; deviceId: string }) {
+        decodedPackets.value.push(packet);
+        // 限制最大数量，防止内存溢出
+        const MAX_PACKETS = 100;
+        if (decodedPackets.value.length > MAX_PACKETS) {
+            decodedPackets.value = decodedPackets.value.slice(-MAX_PACKETS);
+        }
+    }
+    
+    // 清空解码数据包
+    function clearDecodedPackets() {
+        decodedPackets.value = [];
+    }
+
+    async function startTxSignal(deviceId: string, signalType: string, payload?: string) {
+        // Send command
+        const res = await sendCommand("start_tx_signal", {
+            device_id: deviceId,
+            signal_type: signalType,
+            payload
+        });
+        
+        if (res.success && res.data) {
+             // Store the preview spectrum
+             const newTxSpectrums = { ...txSpectrums.value };
+             newTxSpectrums[deviceId] = {
+                 frequencies: res.data.frequencies,
+                 power: res.data.power
+             };
+             txSpectrums.value = newTxSpectrums;
+        }
+        
+        return res;
+    }
+
   return {
     // 状态
     tabs,
     activeTabId,
     status,
     spectrum,
+    txSpectrum, // Exported
     targets,
     devices,
     connectedDeviceIds,
@@ -291,6 +443,12 @@ export const useSDRStore = defineStore('sdr', () => {
     updateSpectrum,
     updateTargets,
     setDevices,
+    startTxSignal, // Exported wrapper
+    
+    // Decoded Packets
+    decodedPackets,
+    addDecodedPacket,
+    clearDecodedPackets,
     
     // WebSocket
     setWebSocket,

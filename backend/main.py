@@ -116,12 +116,124 @@ sdr_system = SDRSystem()
 # ============ WebSocket 命令处理 ============
 MAIN_LOOP = None
 
-def create_stream_callback(device_id: str):
-    """创建特定设备的数据流回调"""
-    processor = SignalProcessor(sample_rate=2000000) # 默认 2M，理想情况应从配置获取
+# 用于跟踪每个设备的解调工作线程和停止事件
+_demod_workers: dict[str, dict] = {}
+
+def create_stream_callback(device_id: str, signal_type: str = 'red_broadcast'):
+    """创建特定设备的数据流回调 (生产者-消费者模式)
+    
+    Args:
+        device_id: 设备 ID
+        signal_type: 信号类型 (red_broadcast, blue_jam_1, 等)
+    """
+    from sdr.demodulator import Demodulator, DemodulatorConfig
+    from protocol.packet_parser import PacketParser
+    import queue
+    import threading
+    
+    # 如果该设备已有 worker，先停止它
+    if device_id in _demod_workers:
+        old = _demod_workers[device_id]
+        old['stop_event'].set()
+        if old['thread'].is_alive():
+            old['thread'].join(timeout=1.0)
+        del _demod_workers[device_id]
+    
+    processor = SignalProcessor(sample_rate=2000000)  # 默认 2M
+    
+    # 根据信号类型创建解调器配置
+    demod_config = DemodulatorConfig.from_signal_type(signal_type, sample_rate=2000000)
+    demodulator = Demodulator(demod_config)
+    packet_parser = PacketParser()
+    
+    # 生产者-消费者队列 (有限容量防止内存溢出)
+    sample_queue = queue.Queue(maxsize=10)
+    stop_event = threading.Event()
+    
+    def demod_worker():
+        """解调工作线程 (消费者)"""
+        print(f"[DEBUG] Demod worker started for {device_id}")
+        process_count = 0
+        while not stop_event.is_set():
+            try:
+                # 从队列获取样本 (超时以便检查停止事件)
+                samples, center_freq = sample_queue.get(timeout=0.5)
+                process_count += 1
+                
+                # 解调 IQ 样本
+                symbols, decoded_bytes = demodulator.demodulate(samples)
+                
+                # 每 50 次处理打印一次调试信息
+                if process_count % 50 == 0:
+                    print(f"[DEBUG] Processed {process_count} buffers, last decoded {len(decoded_bytes)} bytes, {len(symbols)} symbols")
+                
+                # 解析数据包
+                if len(decoded_bytes) > 0:
+                    packets = packet_parser.feed_bytes(decoded_bytes)
+                    
+                    if packets:
+                        print(f"[DEBUG] Decoded {len(packets)} packets!")
+                    
+                    # 发送解码的数据包到前端
+                    if not MAIN_LOOP:
+                         print("[DEBUG] WARNING: MAIN_LOOP is None!")
+                    if not manager.active_connections:
+                         # 仅当确定连接时才打印警告，避免泛滥
+                         # print("[DEBUG] WARNING: No active connections!")
+                         pass
+
+                    if MAIN_LOOP and manager.active_connections and packets:
+                        for pkt in packets:
+                            try:
+                                packet_data = {
+                                    "type": "packet",
+                                    "device_id": device_id,
+                                    "timestamp": pkt.timestamp,
+                                    "hex": pkt.hex_string,
+                                    "packet_type": pkt.packet_type,
+                                    "is_valid": pkt.is_valid
+                                }
+                                json_str = json.dumps(packet_data)
+                                # 限制打印频率或长度以免刷屏
+                                if process_count % 10 == 0:
+                                     print(f"[DEBUG] Broadcasting packet: {json_str[:50]}...")
+                                
+                                asyncio.run_coroutine_threadsafe(
+                                    manager.broadcast(json_str), 
+                                    MAIN_LOOP
+                                )
+                            except Exception as e:
+                                print(f"[DEBUG] JSON serialize/broadcast error: {e}")
+                    elif packets and not manager.active_connections:
+                        print("[DEBUG] Packets dropped - no active WebSocket connections")
+                
+                sample_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Demod worker error: {e}")
+                import traceback
+                traceback.print_exc()
+        print(f"[DEBUG] Demod worker stopped for {device_id}")
+    
+    # 启动解调工作线程
+    worker_thread = threading.Thread(target=demod_worker, daemon=True)
+    worker_thread.start()
+    
+    # 注册到全局字典，以便 stop_streaming 时能停止
+    _demod_workers[device_id] = {
+        'stop_event': stop_event,
+        'thread': worker_thread,
+        'queue': sample_queue
+    }
     
     def callback(samples: np.ndarray):
+        """采样回调 (生产者) - 保持轻量级"""
         if not MAIN_LOOP:
+            return
+        
+        # 检查是否已停止
+        if stop_event.is_set():
             return
             
         try:
@@ -131,13 +243,25 @@ def create_stream_callback(device_id: str):
             center_freq = 0.0
             
             if driver:
-                # 优先使用配置中的中心频率
                 center_freq = driver.config.center_freq
             
+            # 1. 计算频谱 (FFT) - 轻量级处理，不阻塞
             spectrum = processor.compute_spectrum(samples, center_freq=center_freq)
             
+            # 2. 将样本入队供解调线程处理 (非阻塞)
+            try:
+                sample_queue.put_nowait((samples.copy(), center_freq))
+            except queue.Full:
+                # 队列满则丢弃最旧的样本
+                try:
+                    sample_queue.get_nowait()
+                    sample_queue.put_nowait((samples.copy(), center_freq))
+                except:
+                    pass
+            
+            # 3. 发送频谱数据
             if manager.active_connections:
-                data = {
+                spectrum_data = {
                     "type": "spectrum",
                     "device_id": device_id,
                     "frequencies": spectrum.frequencies[::10],
@@ -146,13 +270,25 @@ def create_stream_callback(device_id: str):
                     "underflow": getattr(driver, '_tx_underflow', False) if driver else False
                 }
                 asyncio.run_coroutine_threadsafe(
-                    manager.broadcast(json.dumps(data)), 
+                    manager.broadcast(json.dumps(spectrum_data)), 
                     MAIN_LOOP
                 )
         except Exception as e:
             print(f"Processing error for {device_id}: {e}")
             
     return callback
+
+
+def stop_demod_worker(device_id: str):
+    """停止指定设备的解调工作线程"""
+    if device_id in _demod_workers:
+        worker_info = _demod_workers[device_id]
+        print(f"[DEBUG] Stopping demod worker for {device_id}")
+        worker_info['stop_event'].set()
+        if worker_info['thread'].is_alive():
+            worker_info['thread'].join(timeout=1.0)
+        del _demod_workers[device_id]
+        print(f"[DEBUG] Demod worker stopped for {device_id}")
 
 async def handle_command(command: dict) -> dict:
     cmd = command.get("cmd", "")
@@ -226,7 +362,10 @@ async def handle_command(command: dict) -> dict:
             signal_type = params.get("signal_type")
             payload = params.get("payload")
             if device_id and signal_type:
-                response["success"] = sdr_manager.start_tx_signal(device_id, signal_type, payload)
+                success, preview_data = sdr_manager.start_tx_signal(device_id, signal_type, payload)
+                response["success"] = success
+                if preview_data:
+                    response["data"] = preview_data
             else:
                 response["error"] = "缺少参数"
                 
@@ -239,8 +378,9 @@ async def handle_command(command: dict) -> dict:
 
         elif cmd == "start_streaming":
             device_id = params.get("device_id")
+            signal_type = params.get("signal_type", "red_broadcast")  # 默认红方广播
             if device_id:
-                callback = create_stream_callback(device_id)
+                callback = create_stream_callback(device_id, signal_type)
                 response["success"] = sdr_manager.start_streaming(device_id, callback)
             else:
                 response["error"] = "缺少 device_id"
@@ -248,6 +388,8 @@ async def handle_command(command: dict) -> dict:
         elif cmd == "stop_streaming":
             device_id = params.get("device_id")
             if device_id:
+                # 先停止解调工作线程
+                stop_demod_worker(device_id)
                 response["success"] = sdr_manager.stop_streaming(device_id)
             else:
                 response["error"] = "缺少 device_id"
