@@ -51,8 +51,18 @@ const store = useSDRStore();
 const wsConnected = computed(() => store.isConnected);
 
 const toggleStream = async () => {
+  if (!store.activeTab) return;
+  
   const cmd = store.status.streaming ? 'stop_streaming' : 'start_streaming';
-  await store.sendCommand(cmd, {});
+  const params: any = { device_id: store.activeTab.deviceId };
+  
+  if (cmd === 'start_streaming') {
+    if (store.activeTab.mode === 'tx') {
+      params.rx_enabled = false;
+    }
+  }
+  
+  await store.sendCommand(cmd, params);
   console.log('Toggle stream:', cmd);
 };
 </script>

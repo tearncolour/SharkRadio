@@ -439,8 +439,14 @@ const toggleStream = async () => {
     };
     
     // 启动时传递信号类型
-    if (!currentState && config.value.rxSignalType && config.value.rxSignalType !== 'custom') {
-        params.signal_type = config.value.rxSignalType;
+    if (!currentState) {
+        if (config.value.rxSignalType && config.value.rxSignalType !== 'custom') {
+            params.signal_type = config.value.rxSignalType;
+        }
+        // 如果是仅发射模式，禁用 RX 解调
+        if (config.value.mode === 'tx') {
+            params.rx_enabled = false;
+        }
     }
     
     const result = await store.sendCommand(cmd, params);

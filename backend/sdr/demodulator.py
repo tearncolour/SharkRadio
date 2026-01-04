@@ -1,3 +1,4 @@
+
 """
 4-RRC-FSK Demodulator Module
 实现完整的 4-RRC-FSK 接收解调链路
@@ -8,6 +9,7 @@ from typing import Tuple, Optional
 from dataclasses import dataclass
 
 try:
+    from gnuradio import digital, gr
     from gnuradio.filter import firdes
     GNURADIO_AVAILABLE = True
 except ImportError:
@@ -26,6 +28,35 @@ class DemodulatorConfig:
     @property
     def samples_per_symbol(self) -> int:
         return self.sample_rate // self.symbol_rate
+
+    @staticmethod
+    def from_signal_type(signal_type: str, sample_rate: int = 2_000_000) -> 'DemodulatorConfig':
+        """
+        根据信号类型创建配置
+        
+        Args:
+            signal_type: 信号类型 ('red_broadcast', 'red_jam_1', etc.)
+            sample_rate: 采样率
+            
+        Returns:
+            DemodulatorConfig 实例
+        """
+        # 默认 250k
+        symbol_rate = 250_000
+        
+        if 'jam_1' in signal_type:
+            symbol_rate = 500_000
+        elif 'jam_2' in signal_type:
+            symbol_rate = int(2_000_000 / 7) # ~285.7k (SPS=7)
+        elif 'jam_3' in signal_type:
+            symbol_rate = 200_000
+            
+        print(f"[Demodulator] Creating config for signal_type={signal_type}, symbol_rate={symbol_rate}")
+        
+        return DemodulatorConfig(
+            sample_rate=sample_rate,
+            symbol_rate=symbol_rate
+        )
 
 
 class Demodulator:
@@ -46,273 +77,211 @@ class Demodulator:
         self.config = config or DemodulatorConfig()
         self._rrc_taps = self._generate_rrc_taps()
         
+        # Streaming state for clock recovery
+        self._last_offset = None  # Persistent optimal offset
+        self._sample_buffer = np.array([], dtype=np.float32)  # Edge samples buffer
+        
     def _generate_rrc_taps(self) -> np.ndarray:
-        """生成 RRC 匹配滤波器系数"""
+        """生成 RRC 匹配滤波器系数
+        
+        注意: RX 端使用 gain=1.0 进行匹配滤波
+        TX 端使用 gain=sps 进行插值补偿
+        """
         sps = self.config.samples_per_symbol
         alpha = self.config.rrc_alpha
         ntaps = 11 * sps
         
         if GNURADIO_AVAILABLE:
             taps = firdes.root_raised_cosine(
-                1.0,                        # Gain
+                float(sps),                 # Gain = sps for matched filter output scaling
                 self.config.sample_rate,    # Sampling rate
                 self.config.symbol_rate,    # Symbol rate
                 alpha,                      # Alpha
                 ntaps                       # Num taps
             )
-            return np.array(taps)
         else:
-            # Fallback: 简化 RRC 实现
-            t = np.arange(-ntaps//2, ntaps//2 + 1) / sps
-            coeffs = np.zeros_like(t, dtype=float)
-            for i, ti in enumerate(t):
-                if ti == 0:
-                    coeffs[i] = 1 - alpha + 4*alpha/np.pi
-                elif abs(abs(ti) - 1/(4*alpha)) < 1e-5:
-                    coeffs[i] = (alpha/np.sqrt(2)) * ((1+2/np.pi)*np.sin(np.pi/(4*alpha)) + (1-2/np.pi)*np.cos(np.pi/(4*alpha)))
-                else:
-                    num = np.sin(np.pi*ti*(1-alpha)) + 4*alpha*ti*np.cos(np.pi*ti*(1+alpha))
-                    denom = np.pi*ti*(1 - (4*alpha*ti)**2)
-                    if abs(denom) > 1e-10:
-                        coeffs[i] = num / denom
-            return coeffs / np.sum(np.abs(coeffs))
-    
-    def fm_demodulate(self, iq_samples: np.ndarray) -> np.ndarray:
-        """
-        FM 解调: 通过相位差分提取瞬时频率
-        
-        Args:
-            iq_samples: 复数 IQ 样本数组
+            # Fallback implementation
+            t = np.arange(-ntaps//2, ntaps//2 + 1) / self.config.sample_rate
+            ts = 1 / self.config.symbol_rate
             
-        Returns:
-            瞬时频率数组 (与符号值成正比)
-        """
-        if len(iq_samples) < 2:
-            return np.array([])
+            # Avoid division by zero
+            t = t + 1e-9
             
-        # 相位差分法: θ[n] = angle(iq[n] * conj(iq[n-1]))
-        # 这给出瞬时相位变化，与瞬时频率成正比
-        phase_diff = np.angle(iq_samples[1:] * np.conj(iq_samples[:-1]))
-        
-        # 归一化到符号值范围 [-3, 3]
-        # phase_diff = sensitivity * symbol_value
-        # symbol_value = phase_diff / sensitivity
-        freq_estimate = phase_diff / self.config.sensitivity
-        
-        return freq_estimate
+            val = (np.sin(np.pi * t / ts * (1 - alpha)) + 
+                   4 * alpha * t / ts * np.cos(np.pi * t / ts * (1 + alpha))) / \
+                  (np.pi * t / ts * (1 - (4 * alpha * t / ts)**2))
+            
+            taps = val / np.sqrt(np.sum(val**2))  # Normalize for RX
+            
+        return np.array(taps)
     
+    def fm_demodulate(self, samples: np.ndarray) -> np.ndarray:
+        """
+        FM 解调: 计算相位差
+        Output = angle(sample[n] * conj(sample[n-1]))
+        """
+        # 相位差分
+        phase_diff = np.angle(samples[1:] * np.conj(samples[:-1]))
+        
+        # 归一化: map to symbol range
+        # Phase diff = 2*pi * f_dev * T_sample
+        # f_dev = symbol_val * h * symbol_rate / 2
+        # where deviation h=0.5 (MSK-like)? No, specific sensitivity
+        
+        # 使用配置的灵敏度进行归一化
+        demod = phase_diff / self.config.sensitivity
+        
+        return demod.astype(np.float32)
+
     def apply_rrc_filter(self, signal: np.ndarray) -> np.ndarray:
-        """
-        应用 RRC 匹配滤波器
-        
-        Args:
-            signal: FM 解调后的频率估计信号
-            
-        Returns:
-            滤波后的信号
-        """
+        """应用 RRC 匹配滤波"""
         if len(signal) < len(self._rrc_taps):
             return signal
-        return np.convolve(signal, self._rrc_taps, mode='same')
-    
-    def clock_recovery_gardner(self, signal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        return np.convolve(signal, self._rrc_taps, mode='valid')
+
+    def symbol_decision(self, symbols: np.ndarray) -> np.ndarray:
         """
-        Gardner 时钟恢复算法 (Timing Error Detector)
-        
-        Gardner TED 公式:
-        e[n] = (y[n] - y[n-1]) * y[n-0.5]
-        
-        其中 y[n-0.5] 是符号中点的插值样本
-        
-        Args:
-            signal: RRC 滤波后的信号
-            
-        Returns:
-            (采样时刻索引, 采样值)
+        硬判决: 将连续值映射到 {-3, -1, 1, 3}
         """
-        sps = self.config.samples_per_symbol
+        # 简单阈值判决
+        # -3: < -2
+        # -1: -2 ~ 0
+        #  1: 0 ~ 2
+        #  3: > 2
         
-        if len(signal) < sps * 4:
-            # 信号太短，使用简单方法
-            sample_indices = np.arange(0, len(signal), sps)
-            return sample_indices, signal[sample_indices] if len(sample_indices) > 0 else np.array([])
+        decisions = np.zeros_like(symbols)
         
-        # Gardner 环路参数
-        # 环路带宽 (BL) 影响收敛速度和稳定性
-        loop_bw = 0.01  # 归一化环路带宽
+        decisions[symbols < -2.0] = -3.0
+        decisions[(symbols >= -2.0) & (symbols < 0.0)] = -1.0
+        decisions[(symbols >= 0.0) & (symbols < 2.0)] = 1.0
+        decisions[symbols >= 2.0] = 3.0
         
-        # 计算环路系数 (二阶环路)
-        damping = 1.0  # 阻尼因子
-        theta = loop_bw / (damping + 0.25 / damping)
-        d = 1 + 2*damping*theta + theta**2
-        
-        # 比例和积分增益
-        K1 = 4*damping*theta / d  # 比例增益
-        K2 = 4*theta**2 / d       # 积分增益
-        
-        # 初始化
-        mu = 0.0  # 分数间隔 (0 <= mu < 1)
-        strobe = False
-        
-        # 输出
-        symbols_out = []
-        indices_out = []
-        
-        # 环路滤波器状态
-        v_p = 0.0  # 比例分量
-        v_i = 0.0  # 积分分量
-        
-        # 历史样本用于插值
-        d_0 = 0.0  # 当前符号
-        d_1 = 0.0  # 中点样本
-        d_2 = 0.0  # 上一个符号
-        
-        i = 2 * sps  # 从第 2 个符号开始以确保有足够历史
-        
-        while i < len(signal) - 1:
-            # 线性插值获取当前位置的样本
-            if i + 1 < len(signal):
-                # 在位置 i + mu 进行线性插值
-                y = signal[i] + mu * (signal[i+1] - signal[i])
-            else:
-                y = signal[i]
-            
-            # 更新样本历史
-            d_2 = d_1
-            d_1 = d_0
-            d_0 = y
-            
-            # 每 sps 个样本输出一个符号
-            strobe = (i % sps == 0)
-            
-            if strobe and len(symbols_out) > 0:
-                # Gardner 时间误差检测
-                # e = (d_0 - d_2) * d_1
-                # d_1 是中点样本 (在 d_0 和 d_2 之间)
-                
-                # 获取中点样本 (大约在半个符号周期前)
-                mid_idx = max(0, i - sps // 2)
-                if mid_idx < len(signal):
-                    d_mid = signal[mid_idx]
-                else:
-                    d_mid = d_1
-                
-                # 时间误差
-                timing_error = (d_0 - d_2) * d_mid
-                
-                # 环路滤波器
-                v_p = K1 * timing_error
-                v_i = v_i + K2 * timing_error
-                
-                # 更新分数间隔
-                mu = mu + v_p + v_i
-                
-                # 限制 mu 范围
-                while mu >= 1.0:
-                    mu -= 1.0
-                    i += 1  # 跳过一个样本
-                while mu < 0.0:
-                    mu += 1.0
-                    i -= 1  # 回退一个样本
-            
-            if strobe:
-                symbols_out.append(y)
-                indices_out.append(i)
-            
-            i += 1
-        
-        return np.array(indices_out), np.array(symbols_out)
-    
-    def symbol_decision(self, samples: np.ndarray) -> np.ndarray:
-        """
-        符号判决: 将采样值映射到最近的符号 (-3, -1, 1, 3)
-        
-        Args:
-            samples: 时钟恢复后的采样值
-            
-        Returns:
-            判决后的符号值数组 (-3, -1, 1, 3)
-        """
-        # 计算每个样本到每个符号值的距离
-        # 选择最近的符号
-        distances = np.abs(samples[:, np.newaxis] - self.SYMBOL_VALUES[np.newaxis, :])
-        nearest_indices = np.argmin(distances, axis=1)
-        symbols = self.SYMBOL_VALUES[nearest_indices]
-        
-        return symbols
-    
-    def symbols_to_bits(self, symbols: np.ndarray) -> np.ndarray:
-        """
-        将符号值转换为比特
-        
-        Args:
-            symbols: 符号值数组 (-3, -1, 1, 3)
-            
-        Returns:
-            比特数组 (每个符号产生 2 比特)
-        """
-        bits = []
-        for sym in symbols:
-            # 找到最接近的符号索引
-            idx = np.argmin(np.abs(sym - self.SYMBOL_VALUES))
-            bits.extend(self.SYMBOL_BITS[idx])
-        return np.array(bits, dtype=np.uint8)
-    
+        return decisions
+
     def symbols_to_bytes(self, symbols: np.ndarray) -> bytes:
         """
-        将符号值转换为字节
+        将符号序列转换为字节流
+        Mapping depends on protocol. 
+        Usually 4 symbols = 1 byte (2 bits/symbol)
+        """
+        # 假设:
+        # 3 -> 11
+        # 1 -> 10
+        # -1 -> 01
+        # -3 -> 00
+        
+        # Verify length
+        n_bytes = len(symbols) // 4
+        byte_data = bytearray()
+        
+        for i in range(n_bytes):
+            val = 0
+            for j in range(4):
+                sym = symbols[i*4 + j]
+                bits = 0
+                if sym > 2.0: bits = 0b11
+                elif sym > 0.0: bits = 0b10
+                elif sym > -2.0: bits = 0b01
+                else: bits = 0b00
+                
+                val = (val << 2) | bits
+            byte_data.append(val)
+            
+        return bytes(byte_data)
+
+    def clock_recovery_gnuradio(self, signal: np.ndarray) -> np.ndarray:
+        """
+        快速矢量化时钟恢复 (支持流式处理)
+        
+        使用最小 MSE 法找到最佳采样偏移 (相对于理想符号电平)
+        对于流式处理，使用上一次的偏移作为初始值
         
         Args:
-            symbols: 符号值数组 (-3, -1, 1, 3)
+            signal: RRC 滤波后的信号 (float32)
             
         Returns:
-            解码后的字节数据
+            符号采样值数组
         """
-        bits = self.symbols_to_bits(symbols)
+        sps = self.config.samples_per_symbol
+        n_samples = len(signal)
         
-        # 确保比特数是 8 的倍数
-        num_bytes = len(bits) // 8
-        bits = bits[:num_bytes * 8]
+        if n_samples < sps * 4:
+            offset = self._last_offset if self._last_offset is not None else sps // 2
+            return signal[offset::sps]
         
-        # 比特转字节
-        byte_data = bytearray()
-        for i in range(0, len(bits), 8):
-            byte_val = 0
-            for j in range(8):
-                byte_val = (byte_val << 1) | bits[i + j]
-            byte_data.append(byte_val)
+        # 理想符号电平
+        ideal_levels = np.array([-3.0, -1.0, 1.0, 3.0])
         
-        return bytes(byte_data)
-    
+        # 如果有之前的偏移，先测试它是否仍然有效
+        if self._last_offset is not None:
+            samples = signal[self._last_offset::sps]
+            if len(samples) >= 10:
+                distances = np.abs(samples[:, np.newaxis] - ideal_levels)
+                min_distances = np.min(distances, axis=1)
+                current_mse = np.mean(min_distances ** 2)
+                
+                # 如果 MSE 足够小 (< 0.5)，继续使用上次的偏移
+                if current_mse < 0.5:
+                    return samples
+        
+        # 需要重新搜索最佳偏移
+        best_offset = self._last_offset if self._last_offset is not None else 0
+        best_mse = float('inf')
+        
+        for offset in range(sps):
+            samples = signal[offset::sps]
+            if len(samples) < 10:
+                continue
+            
+            distances = np.abs(samples[:, np.newaxis] - ideal_levels)
+            min_distances = np.min(distances, axis=1)
+            mse = np.mean(min_distances ** 2)
+            
+            if mse < best_mse:
+                best_mse = mse
+                best_offset = offset
+        
+        # 保存偏移供下次使用
+        self._last_offset = best_offset
+        
+        symbols = signal[best_offset::sps]
+        return symbols
+
     def demodulate(self, iq_samples: np.ndarray) -> Tuple[np.ndarray, bytes]:
         """
-        完整解调流程
+        解调 IQ 信号
         
-        Args:
-            iq_samples: 复数 IQ 样本数组
-            
         Returns:
-            (符号值数组, 解码字节)
+            (symbols, decoded_bytes)
         """
-        if len(iq_samples) < self.config.samples_per_symbol * 2:
-            return np.array([]), b''
+        # 1. FM Demodulation
+        fm_demod = self.fm_demodulate(iq_samples)
         
-        # 1. FM 解调
-        freq_estimate = self.fm_demodulate(iq_samples)
+        # 2. RRC Filter
+        filtered = self.apply_rrc_filter(fm_demod)
         
-        # 2. RRC 匹配滤波
-        filtered = self.apply_rrc_filter(freq_estimate)
+        # 3. Clock Recovery (Symbol Sync)
+        # Normalize signal amplitude to help Clock Recovery loop stability
+        # Use Adaptive Normalization (AGC-like) to handle varying RX Gains
+        # Target amplitude: ±3.0 (ideal for symbol decision)
         
-        # 3. 时钟恢复
-        _, sample_values = self.clock_recovery_gardner(filtered)
+        # Calculate recent peak amplitude (simple block-based AGC)
+        peak_amp = np.max(np.abs(filtered))
+        if peak_amp > 1e-6:
+            # Smooth scaling factor could be better, but block-based is fine for now
+            # if buffer size is large enough.
+            scale_factor = 3.0 / peak_amp
+            filtered = filtered * scale_factor
         
-        # 4. 符号判决
-        symbols = self.symbol_decision(sample_values)
+        symbols = self.clock_recovery_gnuradio(filtered)
         
-        # 5. 转换为字节
-        decoded_bytes = self.symbols_to_bytes(symbols)
+        # 4. Symbol Decision (Hard)
+        decisions = self.symbol_decision(symbols)
         
-        return symbols, decoded_bytes
+        # 5. Convert to Bytes
+        decoded_bytes = self.symbols_to_bytes(decisions)
+        
+        return decisions, decoded_bytes
 
 
 # 便捷函数

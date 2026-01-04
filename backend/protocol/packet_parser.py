@@ -144,6 +144,8 @@ class PacketParser:
             print(f"Parse error: {e}")
             return None
 
+    _debug_counter = 0  # Class variable for debug frequency control
+    
     def feed_symbols(self, symbols: np.ndarray) -> List[RadarPacket]:
         """
         输入解调后的符号数据，返回检测到的数据包
@@ -151,6 +153,13 @@ class PacketParser:
         """
         if len(symbols) == 0:
             return []
+        
+        # Debug: 每 500 次调用打印一次符号样本
+        PacketParser._debug_counter += 1
+        if PacketParser._debug_counter % 500 == 0:
+            sample = symbols[:8] if len(symbols) >= 8 else symbols
+            print(f"[Parser Debug] Symbol sample (first 8): {[f'{s:.2f}' for s in sample]}")
+            print(f"[Parser Debug] Buffer size: {len(self._symbol_buffer)}")
             
         self._symbol_buffer.extend(symbols.tolist())
         packets = []
@@ -172,10 +181,10 @@ class PacketParser:
             buffer_view = self._symbol_buffer
             
             for i in range(search_len):
-                if (abs(buffer_view[i] - PREAMBLE_PATTERN[0]) < 0.5 and
-                    abs(buffer_view[i+1] - PREAMBLE_PATTERN[1]) < 0.5 and
-                    abs(buffer_view[i+2] - PREAMBLE_PATTERN[2]) < 0.5 and
-                    abs(buffer_view[i+3] - PREAMBLE_PATTERN[3]) < 0.5):
+                if (abs(buffer_view[i] - PREAMBLE_PATTERN[0]) < 1.0 and
+                    abs(buffer_view[i+1] - PREAMBLE_PATTERN[1]) < 1.0 and
+                    abs(buffer_view[i+2] - PREAMBLE_PATTERN[2]) < 1.0 and
+                    abs(buffer_view[i+3] - PREAMBLE_PATTERN[3]) < 1.0):
                     preamble_idx = i
                     found_preamble = True
                     break
@@ -191,10 +200,10 @@ class PacketParser:
             while pos + 4 <= len(self._symbol_buffer) - 4:
                 # 检查是否还是 Preamble
                 is_preamble = (
-                    abs(buffer_view[pos] - PREAMBLE_PATTERN[0]) < 0.5 and
-                    abs(buffer_view[pos+1] - PREAMBLE_PATTERN[1]) < 0.5 and
-                    abs(buffer_view[pos+2] - PREAMBLE_PATTERN[2]) < 0.5 and
-                    abs(buffer_view[pos+3] - PREAMBLE_PATTERN[3]) < 0.5
+                    abs(buffer_view[pos] - PREAMBLE_PATTERN[0]) < 1.0 and
+                    abs(buffer_view[pos+1] - PREAMBLE_PATTERN[1]) < 1.0 and
+                    abs(buffer_view[pos+2] - PREAMBLE_PATTERN[2]) < 1.0 and
+                    abs(buffer_view[pos+3] - PREAMBLE_PATTERN[3]) < 1.0
                 )
                 if is_preamble:
                     pos += 4
@@ -202,10 +211,10 @@ class PacketParser:
                 
                 # 检查是否是 SOF
                 is_sof = (
-                    abs(buffer_view[pos] - SOF_PATTERN[0]) < 0.5 and
-                    abs(buffer_view[pos+1] - SOF_PATTERN[1]) < 0.5 and
-                    abs(buffer_view[pos+2] - SOF_PATTERN[2]) < 0.5 and
-                    abs(buffer_view[pos+3] - SOF_PATTERN[3]) < 0.5
+                    abs(buffer_view[pos] - SOF_PATTERN[0]) < 1.0 and
+                    abs(buffer_view[pos+1] - SOF_PATTERN[1]) < 1.0 and
+                    abs(buffer_view[pos+2] - SOF_PATTERN[2]) < 1.0 and
+                    abs(buffer_view[pos+3] - SOF_PATTERN[3]) < 1.0
                 )
                 if is_sof:
                     break
@@ -223,6 +232,9 @@ class PacketParser:
             header_bytes = self._symbols_to_bytes(header_symbols)
             
             if not verify_crc8_check_sum(header_bytes, 5):
+                # Debug: 每 500 次 CRC8 失败打印一次 
+                if PacketParser._debug_counter % 500 == 1:
+                    print(f"[Parser Debug] CRC8 failed. Header: {header_bytes.hex().upper()}, symbols: {[f'{s:.1f}' for s in header_symbols[:8]]}")
                 self._symbol_buffer.pop(0)
                 continue
                 

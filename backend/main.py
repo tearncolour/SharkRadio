@@ -119,12 +119,13 @@ MAIN_LOOP = None
 # 用于跟踪每个设备的解调工作线程和停止事件
 _demod_workers: dict[str, dict] = {}
 
-def create_stream_callback(device_id: str, signal_type: str = 'red_broadcast'):
+def create_stream_callback(device_id: str, signal_type: str = 'red_broadcast', rx_enabled: bool = True):
     """创建特定设备的数据流回调 (生产者-消费者模式)
     
     Args:
         device_id: 设备 ID
         signal_type: 信号类型 (red_broadcast, blue_jam_1, 等)
+        rx_enabled: 是否启用 RX 解调 (仅发射时为 False)
     """
     from sdr.demodulator import Demodulator, DemodulatorConfig
     from protocol.packet_parser import PacketParser
@@ -152,6 +153,16 @@ def create_stream_callback(device_id: str, signal_type: str = 'red_broadcast'):
     
     def demod_worker():
         """解调工作线程 (消费者)"""
+        # 如果 RX 未启用，直接消费队列但不处理
+        if not rx_enabled:
+            print(f"[DEBUG] RX disabled for {device_id}, demod worker will drain queue only")
+            while not stop_event.is_set():
+                try:
+                    sample_queue.get(timeout=0.5)  # 只消费，不处理
+                except queue.Empty:
+                    pass
+            return
+            
         print(f"[DEBUG] Demod worker started for {device_id}")
         process_count = 0
         while not stop_event.is_set():
@@ -167,7 +178,13 @@ def create_stream_callback(device_id: str, signal_type: str = 'red_broadcast'):
                 if process_count % 50 == 0:
                     print(f"[DEBUG] Processed {process_count} buffers, last decoded {len(decoded_bytes)} bytes, {len(symbols)} symbols")
                 
-                # 解析数据包
+                # 每 500 次检查是否有 SOF (0xA5) 和 Preamble (0xE4) 出现
+                if process_count % 500 == 0:
+                    sof_count = decoded_bytes.count(0xA5)
+                    preamble_count = decoded_bytes.count(0xE4)
+                    print(f"[DEBUG] SOF (0xA5) count: {sof_count}, Preamble (0xE4) count: {preamble_count} in {len(decoded_bytes)} bytes")
+                
+                # 解析数据包 (使用字节级 SOF 同步)
                 if len(decoded_bytes) > 0:
                     packets = packet_parser.feed_bytes(decoded_bytes)
                     
@@ -379,8 +396,9 @@ async def handle_command(command: dict) -> dict:
         elif cmd == "start_streaming":
             device_id = params.get("device_id")
             signal_type = params.get("signal_type", "red_broadcast")  # 默认红方广播
+            rx_enabled = params.get("rx_enabled", True)  # 默认启用 RX
             if device_id:
-                callback = create_stream_callback(device_id, signal_type)
+                callback = create_stream_callback(device_id, signal_type, rx_enabled)
                 response["success"] = sdr_manager.start_streaming(device_id, callback)
             else:
                 response["error"] = "缺少 device_id"

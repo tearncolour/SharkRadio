@@ -3,6 +3,4 @@
 2.严格参考GNU Radio实现SDR功能,必要时联网搜索
 3.中文注释
 #TODO
-1.bug修复:Connecting to PLUTO SDR at usb:3.10.5...
-Failed to connect to PLUTO SDR: 'PlutoDriver' object has no attribute '_configure_rx'
-2.功能修复:当我创建了多个SDR配置页面,应该对应多个SDR处理后端功能修复:当我创建了多个SDR配置页面,应该对应多个SDR处理后端
+- [x] 1.完整检查整个工程,修复所有错误 (Completed: Restored missing protocol files, fixed signal generator, verified full chain)
